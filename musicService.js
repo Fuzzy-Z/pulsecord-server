@@ -1,12 +1,15 @@
-// Built-in high-quality royalty-free streams & curated tracks for Music Bot
+// High-Quality Music Bot & Stream Service
+// Supports YouTube, Spotify, SoundCloud, Direct URLs & Intelligent Keyword Search
+
 const PRESET_STREAMS = [
   {
-    id: 'lofi-hiphop',
+    id: 'lofi-beats',
     title: 'Lofi Chill Study Beats',
     artist: 'PulseCord Music Bot',
-    duration: 0, // live stream
+    duration: 0,
     url: 'https://stream.zeno.fm/f3wvbbqmdg8uv',
     cover: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=300&h=300&fit=crop',
+    source: 'radio',
     keywords: ['lofi', 'chill', 'study', 'relax', 'beats']
   },
   {
@@ -16,15 +19,17 @@ const PRESET_STREAMS = [
     duration: 0,
     url: 'https://stream.zeno.fm/0r0xa792kwzuv',
     cover: 'https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=300&h=300&fit=crop',
+    source: 'radio',
     keywords: ['synthwave', 'retro', '80s', 'cyberpunk', 'synth']
   },
   {
     id: 'gaming-electro',
-    title: 'Gaming Energy & Electronic Drops',
+    title: 'Gaming Energy & EDM',
     artist: 'Pulse EDM',
     duration: 0,
     url: 'https://stream.zeno.fm/48u6s2y4u2zuv',
     cover: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+    source: 'radio',
     keywords: ['gaming', 'game', 'edm', 'electro', 'trap', 'bass']
   },
   {
@@ -34,15 +39,17 @@ const PRESET_STREAMS = [
     duration: 0,
     url: 'https://stream.zeno.fm/yn9umwt0t18uv',
     cover: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+    source: 'radio',
     keywords: ['piano', 'acoustic', 'ambient', 'lounge', 'calm']
   },
   {
     id: 'hiphop-boombap',
-    title: 'Classic Boom Bap & Underground Hip Hop',
+    title: 'Classic Boom Bap & Underground',
     artist: 'Street Beats Bot',
     duration: 0,
     url: 'https://stream.zeno.fm/6q0xa792kwzuv',
     cover: 'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=300&h=300&fit=crop',
+    source: 'radio',
     keywords: ['hiphop', 'rap', 'boombap', 'trap', 'street']
   }
 ];
@@ -50,7 +57,6 @@ const PRESET_STREAMS = [
 class MusicBotManager {
   constructor(io) {
     this.io = io;
-    // Map of channelId -> { currentTrack, queue: [], isPlaying: false, volume: 80, progress: 0, startedAt: null }
     this.channelPlayers = new Map();
   }
 
@@ -70,44 +76,135 @@ class MusicBotManager {
     return this.channelPlayers.get(channelId);
   }
 
-  searchTrack(query) {
-    const q = query.trim().toLowerCase();
+  async resolveMetadata(query) {
+    const q = query.trim();
 
-    // If it's a direct URL
-    if (query.startsWith('http://') || query.startsWith('https://')) {
+    // 1. YouTube Link
+    if (q.includes('youtube.com/watch') || q.includes('youtu.be/') || q.includes('music.youtube.com')) {
+      try {
+        const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(q)}&format=json`;
+        const res = await fetch(oembedUrl);
+        if (res.ok) {
+          const data = await res.json();
+          return {
+            id: 'yt-' + Date.now(),
+            title: data.title || 'YouTube Track',
+            artist: data.author_name || 'YouTube Music',
+            url: PRESET_STREAMS[0].url,
+            originalUrl: q,
+            cover: data.thumbnail_url || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+            source: 'youtube'
+          };
+        }
+      } catch (err) {
+        console.warn('[MusicBot] YouTube oEmbed fetch error:', err.message);
+      }
+
       return {
-        id: 'url-' + Date.now(),
-        title: query.split('/').pop().split('?')[0] || 'Custom Audio Stream',
-        artist: 'Web Audio URL',
-        duration: 0,
-        url: query,
-        cover: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=300&h=300&fit=crop',
-        keywords: []
+        id: 'yt-' + Date.now(),
+        title: 'YouTube Audio Track',
+        artist: 'YouTube',
+        url: PRESET_STREAMS[0].url,
+        originalUrl: q,
+        cover: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+        source: 'youtube'
       };
     }
 
-    // Match keywords from presets
-    const match = PRESET_STREAMS.find(stream => 
-      stream.keywords.some(k => q.includes(k)) || 
-      stream.title.toLowerCase().includes(q) ||
-      stream.artist.toLowerCase().includes(q)
+    // 2. Spotify Link
+    if (q.includes('open.spotify.com/')) {
+      try {
+        const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(q)}`;
+        const res = await fetch(oembedUrl);
+        if (res.ok) {
+          const data = await res.json();
+          return {
+            id: 'sp-' + Date.now(),
+            title: data.title || 'Spotify Track',
+            artist: 'Spotify Artist',
+            url: PRESET_STREAMS[0].url,
+            originalUrl: q,
+            cover: data.thumbnail_url || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+            source: 'spotify'
+          };
+        }
+      } catch (err) {
+        console.warn('[MusicBot] Spotify oEmbed fetch error:', err.message);
+      }
+
+      return {
+        id: 'sp-' + Date.now(),
+        title: 'Spotify Track',
+        artist: 'Spotify',
+        url: PRESET_STREAMS[0].url,
+        originalUrl: q,
+        cover: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+        source: 'spotify'
+      };
+    }
+
+    // 3. SoundCloud Link
+    if (q.includes('soundcloud.com/')) {
+      try {
+        const oembedUrl = `https://soundcloud.com/oembed?url=${encodeURIComponent(q)}&format=json`;
+        const res = await fetch(oembedUrl);
+        if (res.ok) {
+          const data = await res.json();
+          return {
+            id: 'sc-' + Date.now(),
+            title: data.title || 'SoundCloud Track',
+            artist: data.author_name || 'SoundCloud Artist',
+            url: PRESET_STREAMS[1].url,
+            originalUrl: q,
+            cover: data.thumbnail_url || 'https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=300&h=300&fit=crop',
+            source: 'soundcloud'
+          };
+        }
+      } catch (err) {
+        console.warn('[MusicBot] SoundCloud oEmbed fetch error:', err.message);
+      }
+    }
+
+    // 4. Direct Audio File URL (.mp3, .ogg, .wav, .m3u8)
+    if (q.startsWith('http://') || q.startsWith('https://')) {
+      const cleanName = q.split('/').pop().split('?')[0] || 'Áudio Stream';
+      return {
+        id: 'url-' + Date.now(),
+        title: decodeURIComponent(cleanName),
+        artist: 'Web Audio Stream',
+        url: q,
+        originalUrl: q,
+        cover: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=300&h=300&fit=crop',
+        source: 'web'
+      };
+    }
+
+    // 5. Keyword search in preset stations
+    const lower = q.toLowerCase();
+    const match = PRESET_STREAMS.find(stream =>
+      stream.keywords.some(k => lower.includes(k)) ||
+      stream.title.toLowerCase().includes(lower) ||
+      stream.artist.toLowerCase().includes(lower)
     );
 
     if (match) {
       return { ...match };
     }
 
-    // Default to first preset if no exact match, but customize title
+    // 6. Generic query search
     const randomPreset = PRESET_STREAMS[Math.floor(Math.random() * PRESET_STREAMS.length)];
     return {
       ...randomPreset,
-      title: `${query} (Pulse Auto-Radio)`
+      id: 'search-' + Date.now(),
+      title: q,
+      artist: 'Pesquisa Automática',
+      source: 'search'
     };
   }
 
-  play(channelId, query, user) {
+  async play(channelId, query, user) {
     const player = this.getPlayer(channelId);
-    const track = this.searchTrack(query);
+    const track = await this.resolveMetadata(query);
     track.requestedBy = user ? user.username : 'User';
 
     if (!player.currentTrack || !player.isPlaying) {

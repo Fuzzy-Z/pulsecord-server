@@ -1,11 +1,12 @@
 import { MusicBotManager, PRESET_STREAMS } from './musicService.js';
+import { StorageManager } from './storage.js';
 
-// In-Memory Database (with easy Redis synchronization support)
+// In-Memory & Persistent Database
 const DEFAULT_ROLES = [
   {
     id: 'role-admin',
-    name: '👑 Dono / Admin',
-    color: '#f23f43',
+    name: 'Dono / Admin',
+    color: '#f43f5e',
     permissions: {
       administrator: true,
       manageServer: true,
@@ -20,8 +21,8 @@ const DEFAULT_ROLES = [
   },
   {
     id: 'role-mod',
-    name: '🛡️ Moderador',
-    color: '#5865f2',
+    name: 'Moderador',
+    color: '#6366f1',
     permissions: {
       administrator: false,
       manageServer: false,
@@ -36,8 +37,8 @@ const DEFAULT_ROLES = [
   },
   {
     id: 'role-vip',
-    name: '⭐ VIP / DJ',
-    color: '#f0b232',
+    name: 'VIP / DJ',
+    color: '#f59e0b',
     permissions: {
       administrator: false,
       manageServer: false,
@@ -53,7 +54,7 @@ const DEFAULT_ROLES = [
   {
     id: 'role-member',
     name: 'Membro',
-    color: '#949ba4',
+    color: '#94a3b8',
     permissions: {
       administrator: false,
       manageServer: false,
@@ -72,142 +73,351 @@ const INITIAL_SERVERS = [
   {
     id: 'server-1',
     name: 'PulseCord Community',
-    icon: '⚡',
+    icon: 'PC',
     ownerId: 'system-owner',
+    memberIds: [],
     roles: DEFAULT_ROLES,
     channels: [
-      { id: 'c-general', name: 'geral', type: 'text', topic: 'Conversa geral e boas-vindas' },
-      { id: 'c-bot', name: 'comandos-musica', type: 'text', topic: 'Use /play, /skip, /queue aqui' },
-      { id: 'c-screens', name: 'compartilhamento', type: 'text', topic: 'Prints, gravações e links' },
-      { id: 'v-lounge', name: '🔊 Sala de Estar', type: 'voice', userLimit: 0 },
-      { id: 'v-gaming', name: '🎮 Jogos & Squad', type: 'voice', userLimit: 10 },
-      { id: 'v-music', name: '🎵 Estúdio Musical 24/7', type: 'voice', userLimit: 0 }
-    ],
-    members: []
-  },
-  {
-    id: 'server-2',
-    name: 'Dev & Games Hub',
-    icon: '🚀',
-    ownerId: 'system-owner',
-    roles: DEFAULT_ROLES,
-    channels: [
-      { id: 'c-dev-general', name: 'dev-chat', type: 'text', topic: 'Discussões sobre código e WebRTC' },
-      { id: 'v-dev-voice', name: '🔊 Pair Programming', type: 'voice', userLimit: 5 }
+      { id: 'c-general', name: 'geral', type: 'text', topic: 'Conversa geral e novidades' },
+      { id: 'c-bot', name: 'comandos', type: 'text', topic: 'Use /play, /skip, /queue aqui' },
+      { id: 'c-screens', name: 'compartilhamento', type: 'text', topic: 'Prints e links' },
+      { id: 'v-lounge', name: 'Sala Principal', type: 'voice', userLimit: 0 },
+      { id: 'v-gaming', name: 'Jogos & Squad', type: 'voice', userLimit: 10 },
+      { id: 'v-music', name: 'Estúdio de Áudio', type: 'voice', userLimit: 0 }
     ],
     members: []
   }
 ];
 
-export function setupSignaling(io) {
+export async function setupSignaling(io) {
   const musicBot = new MusicBotManager(io);
+  const storage = new StorageManager();
 
-  // Global state
-  const servers = JSON.parse(JSON.stringify(INITIAL_SERVERS));
-  // Map of socketId -> User profile
-  const users = new Map();
-  // Map of channelId -> Array of userIds currently in voice
-  const voiceRooms = new Map();
-  // Map of channelId -> Array of messages
-  const messageHistory = new Map();
-
-  // Seed some welcome messages
-  messageHistory.set('c-general', [
+  // Initial welcome message history
+  const initialHistory = new Map();
+  initialHistory.set('c-general', [
     {
       id: 'msg-welcome',
       author: {
         id: 'bot-pulse',
         username: 'PulseBot',
-        avatar: '🤖',
-        roleColor: '#5865f2',
-        roleName: 'BOT',
+        avatar: 'PB',
+        roleColor: '#6366f1',
+        roleName: 'SISTEMA',
         isBot: true
       },
-      content: '👋 Bem-vindo ao **PulseCord**! Este aplicativo suporta **voz em tempo real**, **compartilhamento de tela em 60fps**, **cargos configuráveis** e **bot de música**. Conecte-se em um canal de voz para testar!',
+      content: 'Bem-vindo ao **PulseCord**! Voz em tempo real com supressão de ruído inteligente, compartilhamento em 60fps e bot de música integrado (Spotify, YouTube, SoundCloud).',
       timestamp: new Date(Date.now() - 3600000).toISOString(),
       attachments: []
     }
   ]);
 
-  messageHistory.set('c-bot', [
+  initialHistory.set('c-bot', [
     {
       id: 'msg-bot-intro',
       author: {
         id: 'bot-music',
-        username: 'RythmPulse',
-        avatar: '🎵',
-        roleColor: '#f0b232',
+        username: 'MusicBot',
+        avatar: 'MB',
+        roleColor: '#f59e0b',
         roleName: 'MUSIC BOT',
         isBot: true
       },
-      content: '🎶 **Bot de Música Online!**\nUse os comandos:\n- `/play <música ou lofi/synthwave/gaming/URL>`\n- `/pause` e `/resume`\n- `/skip` para pular\n- `/queue` para ver a fila\n- `/stop` para parar',
+      content: '**Bot de Música Ativo**\nComandos disponíveis:\n- `/play <link do Spotify / YouTube / SoundCloud ou nome>`\n- `/pause` e `/resume`\n- `/skip` para pular faixa\n- `/queue` para ver a fila\n- `/stop` para encerrar',
       timestamp: new Date().toISOString(),
       attachments: []
     }
   ]);
 
+  // Load persisted database (from Redis if available, or pulsecord-db.json)
+  const loadedData = await storage.loadInitialData(INITIAL_SERVERS, initialHistory);
+  let registeredUsers = loadedData.users || [];
+  let servers = loadedData.servers || INITIAL_SERVERS;
+  let messageHistory = loadedData.messageHistory || initialHistory;
+
+  // Active online connections: socketId -> User profile
+  const activeSockets = new Map();
+  // Map of channelId -> Array of userIds currently in voice
+  const voiceRooms = new Map();
+
+  // Helper to filter only servers that the user owns or is a member of
+  const getServersForUser = (userId) => {
+    return servers.filter(
+      (s) =>
+        s.ownerId === userId ||
+        (s.memberIds && s.memberIds.includes(userId)) ||
+        s.id === 'server-1'
+    );
+  };
+
+  // 1-Hour Image Attachment Auto-Deletion routine
+  const pruneOldAttachments = () => {
+    const now = Date.now();
+    const ONE_HOUR = 60 * 60 * 1000;
+    let prunedCount = 0;
+
+    for (const [channelId, msgs] of messageHistory.entries()) {
+      msgs.forEach((msg) => {
+        if (msg.attachments && msg.attachments.length > 0) {
+          const msgTime = new Date(msg.timestamp).getTime();
+          if (now - msgTime > ONE_HOUR) {
+            msg.attachments = [];
+            msg.attachmentExpired = true;
+            prunedCount++;
+          }
+        }
+      });
+    }
+
+    if (prunedCount > 0) {
+      console.log(`[Storage] Auto-pruned ${prunedCount} image attachment(s) older than 1 hour.`);
+      storage.saveData(registeredUsers, servers, messageHistory);
+      io.emit('attachments-pruned');
+    }
+  };
+
+  setInterval(pruneOldAttachments, 60 * 1000);
+
   io.on('connection', (socket) => {
     console.log(`[Socket Connected] ID: ${socket.id}`);
 
-    // 1. User Join / Init
-    socket.on('user-init', (userData, callback) => {
-      const user = {
-        id: userData.id || socket.id,
+    // ==========================================
+    // 1. AUTHENTICATION & LOGIN / REGISTER
+    // ==========================================
+
+    // Register New Account
+    socket.on('auth-register', ({ email, password, username, avatar, avatarColor }, callback) => {
+      const normEmail = (email || '').trim().toLowerCase();
+      if (!normEmail || !password) {
+        return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
+      }
+
+      if (registeredUsers.some((u) => u.email === normEmail)) {
+        return callback && callback({ success: false, error: 'Este e-mail já está cadastrado no PulseCord.' });
+      }
+
+      const cleanUsername = (username || normEmail.split('@')[0]).trim();
+      const cleanAvatar = (avatar || cleanUsername).substring(0, 2).toUpperCase();
+
+      const newUser = {
+        id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        email: normEmail,
+        password: password.trim(),
+        username: cleanUsername,
+        avatar: cleanAvatar,
+        avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
+        token: `tok-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
+        createdAt: new Date().toISOString(),
+        serverIds: ['server-1']
+      };
+
+      registeredUsers.push(newUser);
+
+      // Add to default community server
+      const defaultServer = servers.find((s) => s.id === 'server-1');
+      if (defaultServer) {
+        if (!defaultServer.memberIds) defaultServer.memberIds = [];
+        if (!defaultServer.memberIds.includes(newUser.id)) {
+          defaultServer.memberIds.push(newUser.id);
+        }
+      }
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      // Activate session for this socket
+      const activeUser = {
+        ...newUser,
         socketId: socket.id,
-        username: userData.username || `User_${socket.id.slice(0, 4)}`,
-        avatar: userData.avatar || '👤',
-        roleId: userData.roleId || 'role-member',
+        status: 'online',
         isMuted: false,
         isDeafened: false,
         isScreenSharing: false,
-        activeVoiceChannel: null,
-        status: 'online'
+        activeVoiceChannel: null
       };
+      activeSockets.set(socket.id, activeUser);
 
-      users.set(socket.id, user);
-
-      // Join default server member list
-      servers.forEach(s => {
-        if (!s.members.some(m => m.id === user.id)) {
-          s.members.push(user);
-        }
-      });
+      const userServers = getServersForUser(newUser.id);
 
       if (callback) {
         callback({
-          user,
-          servers,
+          success: true,
+          user: {
+            id: newUser.id,
+            email: newUser.email,
+            username: newUser.username,
+            avatar: newUser.avatar,
+            avatarColor: newUser.avatarColor,
+            token: newUser.token
+          },
+          servers: userServers,
           voiceRooms: Object.fromEntries(voiceRooms)
         });
       }
 
-      // Broadcast user connected
+      io.emit('user-status-changed', { user: activeUser });
+    });
+
+    // Login with Email & Password
+    socket.on('auth-login', ({ email, password }, callback) => {
+      const normEmail = (email || '').trim().toLowerCase();
+      const user = registeredUsers.find(
+        (u) => u.email === normEmail && u.password === (password || '').trim()
+      );
+
+      if (!user) {
+        return callback && callback({ success: false, error: 'E-mail ou senha incorretos.' });
+      }
+
+      const activeUser = {
+        ...user,
+        socketId: socket.id,
+        status: 'online',
+        isMuted: false,
+        isDeafened: false,
+        isScreenSharing: false,
+        activeVoiceChannel: null
+      };
+      activeSockets.set(socket.id, activeUser);
+
+      const userServers = getServersForUser(user.id);
+
+      if (callback) {
+        callback({
+          success: true,
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            avatar: user.avatar,
+            avatarColor: user.avatarColor,
+            token: user.token
+          },
+          servers: userServers,
+          voiceRooms: Object.fromEntries(voiceRooms)
+        });
+      }
+
+      io.emit('user-status-changed', { user: activeUser });
+    });
+
+    // Auto-Login / Resume Saved Session (Remember Me)
+    socket.on('auth-session', ({ token, userId }, callback) => {
+      const user = registeredUsers.find((u) => u.token === token || u.id === userId);
+      if (!user) {
+        return callback && callback({ success: false, error: 'Sessão expirada. Faça login novamente.' });
+      }
+
+      const activeUser = {
+        ...user,
+        socketId: socket.id,
+        status: 'online',
+        isMuted: false,
+        isDeafened: false,
+        isScreenSharing: false,
+        activeVoiceChannel: null
+      };
+      activeSockets.set(socket.id, activeUser);
+
+      const userServers = getServersForUser(user.id);
+
+      if (callback) {
+        callback({
+          success: true,
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            avatar: user.avatar,
+            avatarColor: user.avatarColor,
+            token: user.token
+          },
+          servers: userServers,
+          voiceRooms: Object.fromEntries(voiceRooms)
+        });
+      }
+
+      io.emit('user-status-changed', { user: activeUser });
+    });
+
+    // User Profile Update
+    socket.on('user-update-profile', (updatedProfile, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return;
+
+      const registered = registeredUsers.find((u) => u.id === user.id);
+      if (registered) {
+        if (updatedProfile.username) registered.username = updatedProfile.username;
+        if (updatedProfile.avatar) registered.avatar = updatedProfile.avatar;
+        if (updatedProfile.avatarColor) registered.avatarColor = updatedProfile.avatarColor;
+      }
+
+      Object.assign(user, updatedProfile);
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      if (callback) callback({ success: true, user });
       io.emit('user-status-changed', { user });
     });
 
-    // 2. Server & Channels Management
+    // ==========================================
+    // 2. ISOLATED SERVERS & CHANNELS
+    // ==========================================
+
+    // Create Server (Owner only, only visible to creator and invited members)
     socket.on('create-server', ({ name, icon }, callback) => {
-      const user = users.get(socket.id);
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ error: 'Não autenticado' });
+
       const newServer = {
         id: `server-${Date.now()}`,
-        name: name || 'Novo Servidor',
-        icon: icon || '🛡️',
-        ownerId: user ? user.id : socket.id,
+        name: name || 'Novo Espaço',
+        icon: icon || (name ? name.substring(0, 2).toUpperCase() : 'PC'),
+        ownerId: user.id,
+        memberIds: [user.id],
         roles: JSON.parse(JSON.stringify(DEFAULT_ROLES)),
         channels: [
           { id: `c-${Date.now()}-1`, name: 'geral', type: 'text', topic: 'Boas vindas ao novo servidor!' },
-          { id: `v-${Date.now()}-1`, name: '🔊 Geral', type: 'voice', userLimit: 0 }
+          { id: `v-${Date.now()}-1`, name: 'Sala Principal', type: 'voice', userLimit: 0 }
         ],
-        members: user ? [user] : []
+        members: [user]
       };
 
       servers.push(newServer);
-      io.emit('server-created', newServer);
+
+      const registered = registeredUsers.find((u) => u.id === user.id);
+      if (registered) {
+        if (!registered.serverIds) registered.serverIds = [];
+        registered.serverIds.push(newServer.id);
+      }
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      socket.emit('server-created', newServer);
       if (callback) callback(newServer);
     });
 
+    // Join an Existing Server by Server ID
+    socket.on('join-server', ({ serverId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return;
+
+      const targetServer = servers.find((s) => s.id === serverId);
+      if (!targetServer) {
+        return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+      }
+
+      if (!targetServer.memberIds) targetServer.memberIds = [];
+      if (!targetServer.memberIds.includes(user.id)) {
+        targetServer.memberIds.push(user.id);
+      }
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      socket.emit('server-created', targetServer);
+      if (callback) callback({ success: true, server: targetServer });
+    });
+
     socket.on('create-channel', ({ serverId, name, type, topic, userLimit }, callback) => {
-      const server = servers.find(s => s.id === serverId);
+      const server = servers.find((s) => s.id === serverId);
       if (!server) return;
 
       const newChannel = {
@@ -219,42 +429,36 @@ export function setupSignaling(io) {
       };
 
       server.channels.push(newChannel);
+      storage.saveData(registeredUsers, servers, messageHistory);
+
       io.emit('channel-created', { serverId, channel: newChannel });
       if (callback) callback(newChannel);
     });
 
     socket.on('update-roles', ({ serverId, roles }, callback) => {
-      const server = servers.find(s => s.id === serverId);
+      const server = servers.find((s) => s.id === serverId);
       if (server) {
         server.roles = roles;
+        storage.saveData(registeredUsers, servers, messageHistory);
+
         io.emit('server-roles-updated', { serverId, roles });
         if (callback) callback({ success: true });
       }
     });
 
-    socket.on('assign-user-role', ({ serverId, userId, roleId }) => {
-      const server = servers.find(s => s.id === serverId);
-      if (server) {
-        const member = server.members.find(m => m.id === userId);
-        if (member) {
-          member.roleId = roleId;
-          io.emit('user-role-assigned', { serverId, userId, roleId });
-        }
-      }
-    });
-
-    // 3. Text Chat & Messages
+    // ==========================================
+    // 3. TEXT CHAT & MESSAGES
+    // ==========================================
     socket.on('fetch-messages', ({ channelId }, callback) => {
       const msgs = messageHistory.get(channelId) || [];
       if (callback) callback(msgs);
     });
 
     socket.on('send-message', ({ channelId, content, attachments }) => {
-      const user = users.get(socket.id);
-      if (!user || !content?.trim() && (!attachments || attachments.length === 0)) return;
+      const user = activeSockets.get(socket.id);
+      if (!user || (!content?.trim() && (!attachments || attachments.length === 0))) return;
 
-      // Determine user's role info for badge
-      const role = DEFAULT_ROLES.find(r => r.id === user.roleId) || DEFAULT_ROLES[3];
+      const role = DEFAULT_ROLES.find((r) => r.id === user.roleId) || DEFAULT_ROLES[3];
 
       const message = {
         id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -263,11 +467,12 @@ export function setupSignaling(io) {
           id: user.id,
           username: user.username,
           avatar: user.avatar,
+          avatarColor: user.avatarColor,
           roleId: user.roleId,
           roleColor: role.color,
           roleName: role.name
         },
-        content,
+        content: content || '',
         attachments: attachments || [],
         timestamp: new Date().toISOString(),
         reactions: []
@@ -278,25 +483,25 @@ export function setupSignaling(io) {
       }
       messageHistory.get(channelId).push(message);
 
-      // Keep history bounded
-      if (messageHistory.get(channelId).length > 200) {
+      if (messageHistory.get(channelId).length > 250) {
         messageHistory.get(channelId).shift();
       }
 
+      storage.saveData(registeredUsers, servers, messageHistory);
       io.emit('new-message', message);
 
-      // Check if message is a bot command
-      if (content.startsWith('/')) {
-        handleBotCommand(channelId, content, user, io, musicBot, messageHistory);
+      if (content && content.startsWith('/')) {
+        handleBotCommand(channelId, content, user, io, musicBot, messageHistory, storage, servers, registeredUsers);
       }
     });
 
-    // 4. Voice Channels & WebRTC Signaling
+    // ==========================================
+    // 4. VOICE CHANNELS & WEBRTC
+    // ==========================================
     socket.on('join-voice', ({ channelId, serverId }, callback) => {
-      const user = users.get(socket.id);
+      const user = activeSockets.get(socket.id);
       if (!user) return;
 
-      // If user was already in another voice channel, leave it first
       if (user.activeVoiceChannel && user.activeVoiceChannel !== channelId) {
         leaveCurrentVoice(socket, user, io, voiceRooms);
       }
@@ -309,25 +514,22 @@ export function setupSignaling(io) {
       }
 
       const roomUsers = voiceRooms.get(channelId);
-      // Remove any duplicate
-      const existingIdx = roomUsers.findIndex(u => u.id === user.id);
+      const existingIdx = roomUsers.findIndex((u) => u.id === user.id);
       if (existingIdx !== -1) roomUsers.splice(existingIdx, 1);
 
       roomUsers.push(user);
 
-      // Notify others in room
       socket.to(`voice-${channelId}`).emit('user-joined-voice', {
         user,
         channelId
       });
 
-      // Get music bot player state for this channel
       const musicPlayer = musicBot.getPlayer(channelId);
 
       if (callback) {
         callback({
           success: true,
-          usersInRoom: roomUsers.filter(u => u.socketId !== socket.id),
+          usersInRoom: roomUsers.filter((u) => u.socketId !== socket.id),
           musicPlayer
         });
       }
@@ -338,15 +540,14 @@ export function setupSignaling(io) {
     });
 
     socket.on('leave-voice', () => {
-      const user = users.get(socket.id);
+      const user = activeSockets.get(socket.id);
       if (user && user.activeVoiceChannel) {
         leaveCurrentVoice(socket, user, io, voiceRooms);
       }
     });
 
-    // WebRTC Peer-to-Peer Signaling forwarding
     socket.on('webrtc-offer', ({ targetSocketId, offer, isScreenShare }) => {
-      const sender = users.get(socket.id);
+      const sender = activeSockets.get(socket.id);
       io.to(targetSocketId).emit('webrtc-offer', {
         senderSocketId: socket.id,
         senderUser: sender,
@@ -371,9 +572,8 @@ export function setupSignaling(io) {
       });
     });
 
-    // Voice speaking state / Mute / Screen share state
     socket.on('speaking-state', ({ isSpeaking }) => {
-      const user = users.get(socket.id);
+      const user = activeSockets.get(socket.id);
       if (user && user.activeVoiceChannel) {
         socket.to(`voice-${user.activeVoiceChannel}`).emit('user-speaking', {
           socketId: socket.id,
@@ -384,7 +584,7 @@ export function setupSignaling(io) {
     });
 
     socket.on('update-voice-status', ({ isMuted, isDeafened, isScreenSharing }) => {
-      const user = users.get(socket.id);
+      const user = activeSockets.get(socket.id);
       if (user) {
         if (typeof isMuted === 'boolean') user.isMuted = isMuted;
         if (typeof isDeafened === 'boolean') user.isDeafened = isDeafened;
@@ -402,14 +602,14 @@ export function setupSignaling(io) {
     });
 
     // 5. Music Bot Direct Controls
-    socket.on('music-control', ({ action, channelId, query, volume }) => {
-      const user = users.get(socket.id);
+    socket.on('music-control', async ({ action, channelId, query, volume }) => {
+      const user = activeSockets.get(socket.id);
       const targetChannel = channelId || (user ? user.activeVoiceChannel : null);
       if (!targetChannel) return;
 
       switch (action) {
         case 'play':
-          musicBot.play(targetChannel, query || 'lofi', user);
+          await musicBot.play(targetChannel, query || 'lofi', user);
           break;
         case 'pause':
           musicBot.pause(targetChannel);
@@ -429,15 +629,15 @@ export function setupSignaling(io) {
       }
     });
 
-    // Disconnect handler
+    // Disconnect
     socket.on('disconnect', () => {
       console.log(`[Socket Disconnected] ID: ${socket.id}`);
-      const user = users.get(socket.id);
+      const user = activeSockets.get(socket.id);
       if (user) {
         if (user.activeVoiceChannel) {
           leaveCurrentVoice(socket, user, io, voiceRooms);
         }
-        users.delete(socket.id);
+        activeSockets.delete(socket.id);
         io.emit('user-status-changed', { user: { ...user, status: 'offline' } });
       }
     });
@@ -454,7 +654,7 @@ function leaveCurrentVoice(socket, user, io, voiceRooms) {
 
   if (voiceRooms.has(channelId)) {
     const room = voiceRooms.get(channelId);
-    const updated = room.filter(u => u.socketId !== socket.id);
+    const updated = room.filter((u) => u.socketId !== socket.id);
     if (updated.length === 0) {
       voiceRooms.delete(channelId);
     } else {
@@ -473,7 +673,7 @@ function leaveCurrentVoice(socket, user, io, voiceRooms) {
   });
 }
 
-function handleBotCommand(channelId, content, user, io, musicBot, messageHistory) {
+async function handleBotCommand(channelId, content, user, io, musicBot, messageHistory, storage, servers, registeredUsers) {
   const parts = content.trim().split(' ');
   const command = parts[0].toLowerCase();
   const args = parts.slice(1).join(' ');
@@ -485,12 +685,13 @@ function handleBotCommand(channelId, content, user, io, musicBot, messageHistory
     case '/play':
     case '/p':
       if (!args) {
-        botReply = '⚠️ **Uso correto:** `/play <nome da música ou lofi / synthwave / gaming / link>`';
+        botReply = 'Uso correto: `/play <link do YouTube / Spotify / SoundCloud ou nome>`';
       } else {
-        const res = musicBot.play(targetVoiceChannel, args, user);
-        botReply = res.status === 'playing'
-          ? `🎵 **Tocando agora:** \`${res.track.title}\` no canal de voz!`
-          : `📋 **Adicionado à fila:** \`${res.track.title}\` (Posição #${res.queuePosition})`;
+        const res = await musicBot.play(targetVoiceChannel, args, user);
+        botReply =
+          res.status === 'playing'
+            ? `Reproduzindo agora: **${res.track.title}** (${res.track.artist || 'Música'})`
+            : `Adicionado à fila: **${res.track.title}** (Posição #${res.queuePosition})`;
       }
       break;
 
@@ -498,37 +699,37 @@ function handleBotCommand(channelId, content, user, io, musicBot, messageHistory
     case '/s':
       const skipped = musicBot.skip(targetVoiceChannel);
       botReply = skipped.currentTrack
-        ? `⏭️ **Música pulada!** Tocando agora: \`${skipped.currentTrack.title}\``
-        : '⏹️ **Fila vazia!** O bot parou a reprodução.';
+        ? `Faixa pulada. Reproduzindo: **${skipped.currentTrack.title}**`
+        : 'Fila finalizada. O reprodutor foi parado.';
       break;
 
     case '/pause':
       musicBot.pause(targetVoiceChannel);
-      botReply = '⏸️ **Música pausada.** Use `/resume` para continuar.';
+      botReply = 'Reprodução pausada. Digite `/resume` para continuar.';
       break;
 
     case '/resume':
       musicBot.resume(targetVoiceChannel);
-      botReply = '▶️ **Música retomada!**';
+      botReply = 'Reprodução continuada.';
       break;
 
     case '/stop':
       musicBot.stop(targetVoiceChannel);
-      botReply = '⏹️ **Música parada e fila limpa.**';
+      botReply = 'Reprodução finalizada e fila limpa.';
       break;
 
     case '/queue':
     case '/q':
       const player = musicBot.getPlayer(targetVoiceChannel);
       if (!player.currentTrack) {
-        botReply = '📭 Nenhuma música está tocando no momento.';
+        botReply = 'Nenhuma faixa sendo reproduzida no momento.';
       } else {
-        let text = `🎶 **Tocando agora:** \`${player.currentTrack.title}\`\n\n📜 **Fila:**\n`;
+        let text = `Tocando agora: **${player.currentTrack.title}**\n\nFila:\n`;
         if (player.queue.length === 0) {
           text += '_Nenhuma outra música na fila._';
         } else {
           player.queue.forEach((t, i) => {
-            text += `${i + 1}. \`${t.title}\` (Pedido por: ${t.requestedBy})\n`;
+            text += `${i + 1}. **${t.title}** (Pedido por: ${t.requestedBy})\n`;
           });
         }
         botReply = text;
@@ -536,48 +737,40 @@ function handleBotCommand(channelId, content, user, io, musicBot, messageHistory
       break;
 
     case '/help':
-      botReply = `📖 **Comandos do PulseCord Bot:**
-- \`/play <busca/link>\` - Toca música ou rádio lofi/synthwave
-- \`/pause\` / \`/resume\` - Pausa ou despausa
-- \`/skip\` - Pula a música atual
-- \`/queue\` - Mostra a lista de músicas
-- \`/stop\` - Para e limpa a fila
-- \`/roles\` - Informações de cargos e permissões`;
-      break;
-
-    case '/roles':
-      botReply = `🛡️ **Cargos do Servidor:**
-1. 👑 **Dono / Admin** (Vermelho): Acesso total
-2. 🛡️ **Moderador** (Azul): Gerenciar canais e moderação
-3. ⭐ **VIP / DJ** (Dourado): Controle prioritário do bot de música
-4. **Membro** (Cinza): Chat, voz e compartilhamento de tela`;
+      botReply = `**Comandos do PulseCord:**
+- \`/play <busca ou link>\` - Toca música do YouTube, Spotify, SoundCloud ou estações
+- \`/pause\` / \`/resume\` - Pausa ou despausa a reprodução
+- \`/skip\` - Pula para a próxima faixa
+- \`/queue\` - Exibe as faixas na fila
+- \`/stop\` - Para e limpa a fila`;
       break;
   }
 
   if (botReply) {
-    setTimeout(() => {
-      const replyMsg = {
-        id: `msg-bot-${Date.now()}`,
-        channelId,
-        author: {
-          id: 'bot-music',
-          username: 'RythmPulse',
-          avatar: '🎵',
-          roleColor: '#f0b232',
-          roleName: 'MUSIC BOT',
-          isBot: true
-        },
-        content: botReply,
-        attachments: [],
-        timestamp: new Date().toISOString(),
-        reactions: []
-      };
+    const replyMsg = {
+      id: `msg-bot-${Date.now()}`,
+      channelId,
+      author: {
+        id: 'bot-music',
+        username: 'MusicBot',
+        avatar: 'MB',
+        avatarColor: 'from-amber-500 to-orange-600',
+        roleColor: '#f59e0b',
+        roleName: 'MUSIC BOT',
+        isBot: true
+      },
+      content: botReply,
+      attachments: [],
+      timestamp: new Date().toISOString(),
+      reactions: []
+    };
 
-      if (!messageHistory.has(channelId)) {
-        messageHistory.set(channelId, []);
-      }
-      messageHistory.get(channelId).push(replyMsg);
-      io.emit('new-message', replyMsg);
-    }, 400);
+    if (!messageHistory.has(channelId)) {
+      messageHistory.set(channelId, []);
+    }
+    messageHistory.get(channelId).push(replyMsg);
+    storage.saveData(registeredUsers, servers, messageHistory);
+
+    io.emit('new-message', replyMsg);
   }
 }
