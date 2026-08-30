@@ -257,6 +257,65 @@ export async function setupSignaling(io) {
       io.emit('user-status-changed', { user: activeUser });
     });
 
+    // Quick Guest Entry (Nickname only, 1-click test)
+    socket.on('auth-guest', ({ username, avatarColor }, callback) => {
+      const cleanUsername = (username || `User_${Math.floor(1000 + Math.random() * 9000)}`).trim();
+      const cleanAvatar = cleanUsername.substring(0, 2).toUpperCase();
+
+      const guestUser = {
+        id: `usr-guest-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        email: `${cleanUsername.toLowerCase().replace(/[^a-z0-9]/g, '') || 'guest'}@pulsecord.guest`,
+        password: '',
+        username: cleanUsername,
+        avatar: cleanAvatar,
+        avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
+        token: `tok-guest-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+        createdAt: new Date().toISOString(),
+        serverIds: ['server-1'],
+        isGuest: true
+      };
+
+      // Add to default server
+      const defaultServer = servers.find((s) => s.id === 'server-1');
+      if (defaultServer) {
+        if (!defaultServer.memberIds) defaultServer.memberIds = [];
+        if (!defaultServer.memberIds.includes(guestUser.id)) {
+          defaultServer.memberIds.push(guestUser.id);
+        }
+      }
+
+      const activeUser = {
+        ...guestUser,
+        socketId: socket.id,
+        status: 'online',
+        isMuted: false,
+        isDeafened: false,
+        isScreenSharing: false,
+        activeVoiceChannel: null
+      };
+      activeSockets.set(socket.id, activeUser);
+
+      const userServers = getServersForUser(guestUser.id);
+
+      if (callback) {
+        callback({
+          success: true,
+          user: {
+            id: guestUser.id,
+            email: guestUser.email,
+            username: guestUser.username,
+            avatar: guestUser.avatar,
+            avatarColor: guestUser.avatarColor,
+            token: guestUser.token
+          },
+          servers: userServers,
+          voiceRooms: Object.fromEntries(voiceRooms)
+        });
+      }
+
+      io.emit('user-status-changed', { user: activeUser });
+    });
+
     // Login with Email & Password
     socket.on('auth-login', ({ email, password }, callback) => {
       const normEmail = (email || '').trim().toLowerCase();
