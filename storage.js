@@ -19,11 +19,33 @@ if (!fs.existsSync(DATA_DIR)) {
 export class StorageManager {
   constructor() {
     this.redisClient = null;
+    this.upstashClient = null;
     this.useRedis = false;
-    this.initRedis();
+    this.initStorage();
   }
 
-  async initRedis() {
+  async initStorage() {
+    // 1. Check Upstash REST credentials (UPSTASH_REDIS_REST_URL & UPSTASH_REDIS_REST_TOKEN)
+    const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (upstashUrl && upstashToken) {
+      try {
+        console.log('[Storage] UPSTASH_REDIS credentials detected. Initializing Upstash client...');
+        const { Redis } = await import('@upstash/redis');
+        this.upstashClient = new Redis({
+          url: upstashUrl,
+          token: upstashToken
+        });
+        await this.upstashClient.ping();
+        this.useRedis = true;
+        console.log('[Storage] Connected to Upstash Redis via REST successfully!');
+        return;
+      } catch (e) {
+        console.warn('[Storage] Upstash REST connection failed, attempting REDIS_URL fallback:', e.message);
+      }
+    }
+
+    // 2. Check standard REDIS_URL (e.g. rediss://...)
     const redisUrl = process.env.REDIS_URL;
     if (redisUrl) {
       try {
@@ -34,6 +56,7 @@ export class StorageManager {
         await this.redisClient.connect();
         this.useRedis = true;
         console.log('[Storage] Connected to Redis successfully!');
+        return;
       } catch (e) {
         console.warn('[Storage] Redis connection failed, falling back to local JSON database:', e.message);
         this.useRedis = false;
@@ -46,6 +69,26 @@ export class StorageManager {
     let servers = defaultServers;
     let messageHistory = defaultHistory;
 
+    if (this.upstashClient) {
+      try {
+        const rawUsers = await this.upstashClient.get('pulsecord:users');
+        const rawServers = await this.upstashClient.get('pulsecord:servers');
+        const rawHistory = await this.upstashClient.get('pulsecord:history');
+
+        if (rawUsers) users = typeof rawUsers === 'string' ? JSON.parse(rawUsers) : rawUsers;
+        if (rawServers) servers = typeof rawServers === 'string' ? JSON.parse(rawServers) : rawServers;
+        if (rawHistory) {
+          const histObj = typeof rawHistory === 'string' ? JSON.parse(rawHistory) : rawHistory;
+          messageHistory = new Map(Object.entries(histObj));
+        }
+
+        console.log(`[Storage] Loaded data from Upstash Redis (${users.length} users, ${servers.length} servers)`);
+        return { users, servers, messageHistory };
+      } catch (err) {
+        console.warn('[Storage] Error loading from Upstash Redis:', err.message);
+      }
+    }
+
     if (this.useRedis && this.redisClient) {
       try {
         const rawUsers = await this.redisClient.get('pulsecord:users');
@@ -56,13 +99,14 @@ export class StorageManager {
         if (rawServers) servers = JSON.parse(rawServers);
         if (rawHistory) messageHistory = new Map(Object.entries(JSON.parse(rawHistory)));
 
+        console.log(`[Storage] Loaded data from Redis (${users.length} users, ${servers.length} servers)`);
         return { users, servers, messageHistory };
       } catch (err) {
         console.warn('[Storage] Error loading from Redis:', err.message);
       }
     }
 
-    // Local JSON DB
+    // Local JSON DB fallback
     if (fs.existsSync(DB_FILE)) {
       try {
         const content = fs.readFileSync(DB_FILE, 'utf-8');
@@ -84,6 +128,17 @@ export class StorageManager {
 
   async saveData(users, servers, messageHistoryMap) {
     const historyObj = Object.fromEntries(messageHistoryMap);
+
+    if (this.upstashClient) {
+      try {
+        await this.upstashClient.set('pulsecord:users', users);
+        await this.upstashClient.set('pulsecord:servers', servers);
+        await this.upstashClient.set('pulsecord:history', historyObj);
+        return;
+      } catch (err) {
+        console.warn('[Storage] Failed saving to Upstash Redis:', err.message);
+      }
+    }
 
     if (this.useRedis && this.redisClient) {
       try {
