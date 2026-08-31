@@ -1,5 +1,6 @@
 // High-Quality Music Bot & Stream Service
-// Supports YouTube, Spotify, SoundCloud, Direct URLs & Intelligent Keyword Search
+// Real-time audio streaming from YouTube, Spotify, SoundCloud, Direct URLs & Music Search
+import play_dl from 'play-dl';
 
 const PRESET_STREAMS = [
   {
@@ -54,6 +55,20 @@ const PRESET_STREAMS = [
   }
 ];
 
+let isSoundCloudInit = false;
+async function ensureSoundCloud() {
+  if (isSoundCloudInit) return;
+  try {
+    const clientId = await play_dl.getFreeClientID();
+    if (clientId) {
+      await play_dl.setToken({ soundcloud: { client_id: clientId } });
+      isSoundCloudInit = true;
+    }
+  } catch (e) {
+    console.warn('[MusicBot] SoundCloud init error:', e.message);
+  }
+}
+
 class MusicBotManager {
   constructor(io) {
     this.io = io;
@@ -79,125 +94,135 @@ class MusicBotManager {
   async resolveMetadata(query) {
     const q = query.trim();
 
-    // 1. YouTube Link
-    if (q.includes('youtube.com/watch') || q.includes('youtu.be/') || q.includes('music.youtube.com')) {
-      try {
-        const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(q)}&format=json`;
-        const res = await fetch(oembedUrl);
-        if (res.ok) {
-          const data = await res.json();
-          return {
-            id: 'yt-' + Date.now(),
-            title: data.title || 'YouTube Track',
-            artist: data.author_name || 'YouTube Music',
-            url: PRESET_STREAMS[0].url,
-            originalUrl: q,
-            cover: data.thumbnail_url || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
-            source: 'youtube'
-          };
-        }
-      } catch (err) {
-        console.warn('[MusicBot] YouTube oEmbed fetch error:', err.message);
-      }
-
-      return {
-        id: 'yt-' + Date.now(),
-        title: 'YouTube Audio Track',
-        artist: 'YouTube',
-        url: PRESET_STREAMS[0].url,
-        originalUrl: q,
-        cover: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
-        source: 'youtube'
-      };
-    }
-
-    // 2. Spotify Link
-    if (q.includes('open.spotify.com/')) {
-      try {
-        const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(q)}`;
-        const res = await fetch(oembedUrl);
-        if (res.ok) {
-          const data = await res.json();
-          return {
-            id: 'sp-' + Date.now(),
-            title: data.title || 'Spotify Track',
-            artist: 'Spotify Artist',
-            url: PRESET_STREAMS[0].url,
-            originalUrl: q,
-            cover: data.thumbnail_url || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
-            source: 'spotify'
-          };
-        }
-      } catch (err) {
-        console.warn('[MusicBot] Spotify oEmbed fetch error:', err.message);
-      }
-
-      return {
-        id: 'sp-' + Date.now(),
-        title: 'Spotify Track',
-        artist: 'Spotify',
-        url: PRESET_STREAMS[0].url,
-        originalUrl: q,
-        cover: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
-        source: 'spotify'
-      };
-    }
-
-    // 3. SoundCloud Link
-    if (q.includes('soundcloud.com/')) {
-      try {
-        const oembedUrl = `https://soundcloud.com/oembed?url=${encodeURIComponent(q)}&format=json`;
-        const res = await fetch(oembedUrl);
-        if (res.ok) {
-          const data = await res.json();
-          return {
-            id: 'sc-' + Date.now(),
-            title: data.title || 'SoundCloud Track',
-            artist: data.author_name || 'SoundCloud Artist',
-            url: PRESET_STREAMS[1].url,
-            originalUrl: q,
-            cover: data.thumbnail_url || 'https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=300&h=300&fit=crop',
-            source: 'soundcloud'
-          };
-        }
-      } catch (err) {
-        console.warn('[MusicBot] SoundCloud oEmbed fetch error:', err.message);
-      }
-    }
-
-    // 4. Direct Audio File URL (.mp3, .ogg, .wav, .m3u8)
-    if (q.startsWith('http://') || q.startsWith('https://')) {
+    // 1. Direct audio stream or file URL (.mp3, .aac, .m4a, .ogg, streaming stations)
+    if (
+      q.match(/\.(mp3|wav|ogg|m4a|aac)($|\?)/i) ||
+      q.includes('stream.zeno.fm') ||
+      q.includes('icecast') ||
+      q.includes('shoutcast')
+    ) {
       const cleanName = q.split('/').pop().split('?')[0] || 'Áudio Stream';
       return {
-        id: 'url-' + Date.now(),
+        id: 'direct-' + Date.now(),
         title: decodeURIComponent(cleanName),
         artist: 'Web Audio Stream',
         url: q,
         originalUrl: q,
         cover: 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=300&h=300&fit=crop',
-        source: 'web'
+        duration: 0,
+        source: 'direct'
       };
     }
 
-    // 5. Keyword search in preset stations
+    let searchTitle = q;
+    let fallbackArtist = '';
+    let fallbackCover = '';
+    let isSpotify = false;
+    let isYouTube = false;
+
+    // 2. Spotify Link: Extract title and artist via Spotify oEmbed
+    if (q.includes('open.spotify.com/')) {
+      isSpotify = true;
+      try {
+        const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(q)}`;
+        const res = await fetch(oembedUrl);
+        if (res.ok) {
+          const data = await res.json();
+          searchTitle = data.title || q;
+          fallbackCover = data.thumbnail_url || '';
+          fallbackArtist = 'Spotify';
+        }
+      } catch (err) {
+        console.warn('[MusicBot] Spotify oEmbed error:', err.message);
+      }
+    }
+
+    // 3. YouTube Link: Extract title via YouTube oEmbed
+    if (q.includes('youtube.com/') || q.includes('youtu.be/')) {
+      isYouTube = true;
+      try {
+        const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(q)}&format=json`;
+        const res = await fetch(oembedUrl);
+        if (res.ok) {
+          const data = await res.json();
+          searchTitle = data.title || q;
+          fallbackArtist = data.author_name || 'YouTube';
+          fallbackCover = data.thumbnail_url || '';
+        }
+      } catch (err) {
+        console.warn('[MusicBot] YouTube oEmbed error:', err.message);
+      }
+    }
+
+    // 4. Try streaming via SoundCloud / Play-DL (Plays the exact audio stream)
+    try {
+      await ensureSoundCloud();
+      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 1 });
+      if (scResults && scResults.length > 0) {
+        const track = scResults[0];
+        const stream = await play_dl.stream(track.url);
+        if (stream && stream.url) {
+          return {
+            id: 'sc-' + Date.now(),
+            title: track.name || searchTitle,
+            artist: track.user?.name || fallbackArtist || 'SoundCloud Artist',
+            url: stream.url,
+            originalUrl: track.url || q,
+            cover: track.thumbnail || fallbackCover || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+            duration: track.durationInSec || 0,
+            source: isSpotify ? 'spotify' : isYouTube ? 'youtube' : 'soundcloud'
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[MusicBot] SoundCloud stream resolution error:', err.message);
+    }
+
+    // 5. High-fidelity Fallback: Search Apple Music / iTunes
+    try {
+      const iTunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTitle)}&media=music&limit=1`;
+      const res = await fetch(iTunesUrl);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.results && data.results.length > 0) {
+          const track = data.results[0];
+          return {
+            id: 'itunes-' + Date.now(),
+            title: track.trackName || searchTitle,
+            artist: track.artistName || fallbackArtist || 'Artista',
+            url: track.previewUrl,
+            originalUrl: q,
+            cover: track.artworkUrl100?.replace('100x100bb', '600x600bb') || fallbackCover || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+            duration: 30,
+            source: isSpotify ? 'spotify' : isYouTube ? 'youtube' : 'itunes'
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[MusicBot] iTunes audio resolution error:', err.message);
+    }
+
+    // 6. Check preset keywords
     const lower = q.toLowerCase();
-    const match = PRESET_STREAMS.find(stream =>
-      stream.keywords.some(k => lower.includes(k)) ||
-      stream.title.toLowerCase().includes(lower) ||
-      stream.artist.toLowerCase().includes(lower)
+    const match = PRESET_STREAMS.find(
+      (stream) =>
+        stream.keywords.some((k) => lower.includes(k)) ||
+        stream.title.toLowerCase().includes(lower) ||
+        stream.artist.toLowerCase().includes(lower)
     );
 
     if (match) {
-      return { ...match };
+      return { ...match, id: 'preset-' + Date.now() };
     }
 
-    // 6. Generic query search
+    // 7. Ultimate fallback: Preset radio
     const randomPreset = PRESET_STREAMS[Math.floor(Math.random() * PRESET_STREAMS.length)];
     return {
       ...randomPreset,
       id: 'search-' + Date.now(),
-      title: q,
-      artist: 'Pesquisa Automática',
+      title: searchTitle,
+      artist: fallbackArtist || 'PulseCord Radio',
+      cover: fallbackCover || randomPreset.cover,
       source: 'search'
     };
   }
