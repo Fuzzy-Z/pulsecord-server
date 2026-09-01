@@ -28,10 +28,13 @@ const io = new Server(server, {
 
 const VERSION_FILE = path.join(__dirname, 'version.json');
 const ASAR_FILE = path.join(__dirname, 'app.asar');
-const DIST_PATH = path.join(__dirname, '../dist');
+const DIST_PATH = fs.existsSync(path.join(__dirname, 'dist'))
+  ? path.join(__dirname, 'dist')
+  : path.join(__dirname, '../dist');
 
 // Serve static web app bundle if present
 if (fs.existsSync(DIST_PATH)) {
+  console.log(`[Voxel Web] Serving static frontend from: ${DIST_PATH}`);
   app.use(express.static(DIST_PATH));
 }
 
