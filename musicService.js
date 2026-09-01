@@ -227,6 +227,36 @@ class MusicBotManager {
     };
   }
 
+  async searchTracks(query) {
+    if (!query || !query.trim()) return [];
+    const searchTitle = query.trim();
+    const results = [];
+    try {
+      const iTunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTitle)}&media=music&limit=5`;
+      const res = await fetch(iTunesUrl);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.results && data.results.length > 0) {
+          data.results.forEach((track, i) => {
+            results.push({
+              id: 'search-' + Date.now() + '-' + i,
+              title: track.trackName || searchTitle,
+              artist: track.artistName || 'Artista',
+              url: track.previewUrl,
+              originalUrl: track.trackViewUrl,
+              cover: track.artworkUrl100?.replace('100x100bb', '600x600bb') || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+              duration: 30,
+              source: 'itunes'
+            });
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[MusicBot] Search resolution error:', err.message);
+    }
+    return results;
+  }
+
   async play(channelId, query, user) {
     const player = this.getPlayer(channelId);
     const track = await this.resolveMetadata(query);

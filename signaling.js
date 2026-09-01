@@ -139,15 +139,63 @@ export async function setupSignaling(io) {
   const activeSockets = new Map();
   // Map of channelId -> Array of userIds currently in voice
   const voiceRooms = new Map();
+  // Map of channelId -> Watch Together state
+  const watchTogetherRooms = new Map();
+
+  const sanitizeUser = (u) => {
+    if (!u) return null;
+    const active = Array.from(activeSockets.values()).find((act) => act.id === u.id);
+    return {
+      id: u.id,
+      username: u.username,
+      displayName: u.displayName || u.username,
+      avatar: u.avatar || (u.username ? u.username.substring(0, 2).toUpperCase() : 'US'),
+      avatarUrl: u.avatarUrl || null,
+      avatarColor: u.avatarColor || 'from-indigo-500 to-purple-600',
+      bannerUrl: u.bannerUrl || null,
+      customStatus: u.customStatus || null,
+      gameStatus: u.gameStatus || null,
+      roleId: u.roleId || 'role-member',
+      status: active ? (active.status || 'online') : 'offline'
+    };
+  };
+
+  const formatServerWithMembers = (s) => {
+    let memberList = [];
+    if (s.id === 'server-1') {
+      const allKnown = [...registeredUsers];
+      for (const act of activeSockets.values()) {
+        if (!allKnown.some((u) => u.id === act.id)) {
+          allKnown.push(act);
+        }
+      }
+      memberList = allKnown.map(sanitizeUser).filter(Boolean);
+    } else {
+      const ids = new Set([s.ownerId, ...(s.memberIds || [])]);
+      memberList = Array.from(ids)
+        .map((id) => {
+          const u = registeredUsers.find((r) => r.id === id) || Array.from(activeSockets.values()).find((act) => act.id === id);
+          return sanitizeUser(u);
+        })
+        .filter(Boolean);
+    }
+
+    return {
+      ...s,
+      members: memberList
+    };
+  };
 
   // Helper to filter only servers that the user owns or is a member of
   const getServersForUser = (userId) => {
-    return servers.filter(
-      (s) =>
-        s.ownerId === userId ||
-        (s.memberIds && s.memberIds.includes(userId)) ||
-        s.id === 'server-1'
-    );
+    return servers
+      .filter(
+        (s) =>
+          s.ownerId === userId ||
+          (s.memberIds && s.memberIds.includes(userId)) ||
+          s.id === 'server-1' // Community server is visible to all registered users
+      )
+      .map(formatServerWithMembers);
   };
 
   // 1-Hour Image Attachment Auto-Deletion routine
@@ -208,7 +256,17 @@ export async function setupSignaling(io) {
         avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
         token: `tok-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
         createdAt: new Date().toISOString(),
-        serverIds: ['server-1']
+        serverIds: ['server-1'],
+        bio: '',
+        pronouns: '',
+        displayName: cleanUsername,
+        customStatus: { text: '', emoji: '' },
+        gameStatus: '',
+        badges: [],
+        avatarUrl: '',
+        bannerUrl: '',
+        avatarDecoration: '',
+        profileEffect: ''
       };
 
       registeredUsers.push(newUser);
@@ -242,12 +300,8 @@ export async function setupSignaling(io) {
         callback({
           success: true,
           user: {
-            id: newUser.id,
-            email: newUser.email,
-            username: newUser.username,
-            avatar: newUser.avatar,
-            avatarColor: newUser.avatarColor,
-            token: newUser.token
+            ...newUser,
+            password: undefined
           },
           servers: userServers,
           voiceRooms: Object.fromEntries(voiceRooms)
@@ -272,7 +326,17 @@ export async function setupSignaling(io) {
         token: `tok-guest-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
         createdAt: new Date().toISOString(),
         serverIds: ['server-1'],
-        isGuest: true
+        isGuest: true,
+        bio: '',
+        pronouns: '',
+        displayName: cleanUsername,
+        customStatus: { text: '', emoji: '' },
+        gameStatus: '',
+        badges: [],
+        avatarUrl: '',
+        bannerUrl: '',
+        avatarDecoration: '',
+        profileEffect: ''
       };
 
       // Add to default server
@@ -301,12 +365,8 @@ export async function setupSignaling(io) {
         callback({
           success: true,
           user: {
-            id: guestUser.id,
-            email: guestUser.email,
-            username: guestUser.username,
-            avatar: guestUser.avatar,
-            avatarColor: guestUser.avatarColor,
-            token: guestUser.token
+            ...guestUser,
+            password: undefined
           },
           servers: userServers,
           voiceRooms: Object.fromEntries(voiceRooms)
@@ -344,12 +404,8 @@ export async function setupSignaling(io) {
         callback({
           success: true,
           user: {
-            id: user.id,
-            email: user.email,
-            username: user.username,
-            avatar: user.avatar,
-            avatarColor: user.avatarColor,
-            token: user.token
+            ...user,
+            password: undefined
           },
           servers: userServers,
           voiceRooms: Object.fromEntries(voiceRooms)
@@ -383,12 +439,8 @@ export async function setupSignaling(io) {
         callback({
           success: true,
           user: {
-            id: user.id,
-            email: user.email,
-            username: user.username,
-            avatar: user.avatar,
-            avatarColor: user.avatarColor,
-            token: user.token
+            ...user,
+            password: undefined
           },
           servers: userServers,
           voiceRooms: Object.fromEntries(voiceRooms)
@@ -399,22 +451,45 @@ export async function setupSignaling(io) {
     });
 
     // User Profile Update
-    socket.on('user-update-profile', (updatedProfile, callback) => {
-      const user = activeSockets.get(socket.id);
-      if (!user) return;
+    socket.on('update-profile', (profileData, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return callback && callback({ success: false, error: 'Not authenticated' });
 
-      const registered = registeredUsers.find((u) => u.id === user.id);
-      if (registered) {
-        if (updatedProfile.username) registered.username = updatedProfile.username;
-        if (updatedProfile.avatar) registered.avatar = updatedProfile.avatar;
-        if (updatedProfile.avatarColor) registered.avatarColor = updatedProfile.avatarColor;
+      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'username', 'appTheme', 'compactMode', 'clipSettings'];
+      
+      const userIndex = registeredUsers.findIndex(u => u.id === activeUser.id);
+      
+      allowedFields.forEach(field => {
+        if (profileData[field] !== undefined) {
+          activeUser[field] = profileData[field];
+          if (userIndex !== -1) {
+            registeredUsers[userIndex][field] = profileData[field];
+          }
+        }
+      });
+
+      // Generate monogram avatar if display name changed and no custom URL
+      if (profileData.displayName && !activeUser.avatarUrl) {
+         activeUser.avatar = profileData.displayName.substring(0, 2).toUpperCase();
+         if (userIndex !== -1) {
+           registeredUsers[userIndex].avatar = activeUser.avatar;
+         }
       }
 
-      Object.assign(user, updatedProfile);
-      storage.saveData(registeredUsers, servers, messageHistory);
+      if (userIndex !== -1) {
+        storage.saveData(registeredUsers, servers, messageHistory);
+      }
 
-      if (callback) callback({ success: true, user });
-      io.emit('user-status-changed', { user });
+      // Broadcast to everyone
+      io.emit('user-profile-updated', { user: activeUser });
+
+      if (callback) {
+        if (userIndex !== -1) {
+          callback({ success: true, user: { ...registeredUsers[userIndex], password: undefined } });
+        } else {
+          callback({ success: true, user: activeUser });
+        }
+      }
     });
 
     // ==========================================
@@ -450,8 +525,10 @@ export async function setupSignaling(io) {
 
       storage.saveData(registeredUsers, servers, messageHistory);
 
-      socket.emit('server-created', newServer);
-      if (callback) callback(newServer);
+      // Send to creator
+      const formattedNew = formatServerWithMembers(newServer);
+      socket.emit('server-created', formattedNew);
+      if (callback) callback(formattedNew);
     });
 
     // Join an Existing Server by Server ID
@@ -471,8 +548,9 @@ export async function setupSignaling(io) {
 
       storage.saveData(registeredUsers, servers, messageHistory);
 
-      socket.emit('server-created', targetServer);
-      if (callback) callback({ success: true, server: targetServer });
+      const formattedTarget = formatServerWithMembers(targetServer);
+      socket.emit('server-created', formattedTarget);
+      if (callback) callback({ success: true, server: formattedTarget });
     });
 
     socket.on('create-channel', ({ serverId, name, type, topic, userLimit }, callback) => {
@@ -584,12 +662,15 @@ export async function setupSignaling(io) {
       });
 
       const musicPlayer = musicBot.getPlayer(channelId);
+      const defaultState = { isActive: false, url: '', isPlaying: false, currentTime: 0, queue: [], participants: [], hostId: null };
+      const watchTogether = watchTogetherRooms.get(channelId) || defaultState;
 
       if (callback) {
         callback({
           success: true,
           usersInRoom: roomUsers.filter((u) => u.socketId !== socket.id),
-          musicPlayer
+          musicPlayer,
+          watchTogether
         });
       }
 
@@ -661,6 +742,15 @@ export async function setupSignaling(io) {
     });
 
     // 5. Music Bot Direct Controls
+    socket.on('music-search', async ({ query }, callback) => {
+      try {
+        const results = await musicBot.searchTracks(query);
+        if (callback) callback({ success: true, results });
+      } catch (err) {
+        if (callback) callback({ success: false, error: err.message });
+      }
+    });
+
     socket.on('music-control', async ({ action, channelId, query, volume }) => {
       const user = activeSockets.get(socket.id);
       const targetChannel = channelId || (user ? user.activeVoiceChannel : null);
@@ -686,6 +776,84 @@ export async function setupSignaling(io) {
           musicBot.setVolume(targetChannel, volume);
           break;
       }
+    });
+
+    // 6. Watch Together Realtime Sync
+    socket.on('watch-together-action', ({ channelId, action, payload }) => {
+      const user = activeSockets.get(socket.id);
+      const targetChannel = channelId || (user ? user.activeVoiceChannel : null);
+      if (!targetChannel || !user) return;
+
+      const defaultState = { isActive: false, url: '', isPlaying: false, currentTime: 0, queue: [], participants: [], hostId: null };
+      let current = watchTogetherRooms.get(targetChannel) || { ...defaultState };
+
+      switch (action) {
+        case 'start':
+          current = {
+            ...defaultState,
+            isActive: true,
+            url: payload.url,
+            isPlaying: true,
+            hostId: user.id,
+            participants: [user.id]
+          };
+          break;
+        case 'sync':
+          // Only host should sync playback state to avoid conflicts
+          if (current.hostId === user.id) {
+            current = { ...current, ...payload };
+          }
+          break;
+        case 'join':
+          if (current.isActive && !current.participants.includes(user.id)) {
+            current.participants.push(user.id);
+          }
+          break;
+        case 'leave':
+          current.participants = current.participants.filter(id => id !== user.id);
+          if (current.participants.length === 0) {
+            current = { ...defaultState }; // End watchparty if empty
+          } else if (current.hostId === user.id) {
+            // Pass host to someone else
+            current.hostId = current.participants[0];
+          }
+          break;
+        case 'enqueue':
+          if (current.isActive && payload.url) {
+            if (!current.url) {
+              current.url = payload.url;
+              current.isPlaying = true;
+              current.currentTime = 0;
+            } else {
+              current.queue.push(payload.url);
+            }
+          }
+          break;
+        case 'next':
+          if (current.isActive && current.hostId === user.id) {
+            if (current.queue.length > 0) {
+              const nextUrl = current.queue.shift();
+              current.url = nextUrl;
+              current.isPlaying = true;
+              current.currentTime = 0;
+            } else {
+              current = { ...defaultState }; // Queue ended, stop watchparty
+            }
+          }
+          break;
+        case 'end':
+          if (current.hostId === user.id) {
+            current = { ...defaultState };
+          }
+          break;
+      }
+
+      watchTogetherRooms.set(targetChannel, current);
+
+      io.to(`voice-${targetChannel}`).emit('watch-together-state-update', {
+        channelId: targetChannel,
+        state: current
+      });
     });
 
     // Disconnect
