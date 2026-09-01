@@ -28,11 +28,17 @@ const io = new Server(server, {
 
 const VERSION_FILE = path.join(__dirname, 'version.json');
 const ASAR_FILE = path.join(__dirname, 'app.asar');
+const DIST_PATH = path.join(__dirname, '../dist');
 
-app.get('/', (req, res) => {
+// Serve static web app bundle if present
+if (fs.existsSync(DIST_PATH)) {
+  app.use(express.static(DIST_PATH));
+}
+
+app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
-    service: 'PulseCord WebRTC & Signaling Server',
+    service: 'Voxel WebRTC & Signaling Server',
     uptime: process.uptime(),
     timestamp: new Date().toISOString()
   });
@@ -74,6 +80,16 @@ app.get('/api/update/app.asar', (req, res) => {
     res.status(404).json({ error: 'Nenhum pacote app.asar disponível para download no servidor.' });
   }
 });
+
+// SPA fallback for web browser access
+if (fs.existsSync(DIST_PATH)) {
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) {
+      return next();
+    }
+    res.sendFile(path.join(DIST_PATH, 'index.html'));
+  });
+}
 
 // Initialize Socket.io signaling & music bot
 setupSignaling(io);

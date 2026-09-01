@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voxel</title>
+    <!-- Voxel App Favicon -->
+    <link rel="icon" type="image/png" href="./icon.png" />
+    <link rel="shortcut icon" type="image/png" href="./icon.png" />
+    <link rel="apple-touch-icon" href="./icon.png" />
+    <!-- Modern Typography: Plus Jakarta Sans & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      /* Smooth UI Scrollbars */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 9999px;
+        -webkit-transition: background 0.2s ease;
+        transition: background 0.2s ease;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.25);
+      }
+      /* Prevent selection on UI buttons */
+      .no-select {
+        -moz-user-select: none;
+             user-select: none;
+        -webkit-user-select: none;
+      }
+      /* Custom electron drag region */
+      .app-drag-region {
+        -webkit-app-region: drag;
+      }
+      .app-no-drag {
+        -webkit-app-region: no-drag;
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-CvemCHzr.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-BRTJrQ4e.css">
+  </head>
+  <body class="bg-sys-base text-sys-text overflow-hidden font-sans select-none m-0 p-0 h-screen w-screen antialiased">
+    <div id="root" class="h-full w-full flex flex-col"></div>
+  </body>
+</html>
