@@ -154,7 +154,7 @@ class MusicBotManager {
       }
     }
 
-    // 4. Try streaming via SoundCloud / Play-DL (Plays the exact audio stream)
+    // 4. Try streaming via SoundCloud / Play-DL (Plays the exact full audio stream)
     try {
       await ensureSoundCloud();
       const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 1 });
@@ -178,28 +178,27 @@ class MusicBotManager {
       console.warn('[MusicBot] SoundCloud stream resolution error:', err.message);
     }
 
-    // 5. High-fidelity Fallback: Search Apple Music / iTunes
+    // 5. Full Streaming Fallback: Search Audius (Full length tracks)
     try {
-      const iTunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTitle)}&media=music&limit=1`;
-      const res = await fetch(iTunesUrl);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.results && data.results.length > 0) {
-          const track = data.results[0];
+      const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(searchTitle)}&app_name=pulsecord`);
+      if (audiusRes.ok) {
+        const audiusData = await audiusRes.json();
+        if (audiusData.data && audiusData.data.length > 0) {
+          const track = audiusData.data[0];
           return {
-            id: 'itunes-' + Date.now(),
-            title: track.trackName || searchTitle,
-            artist: track.artistName || fallbackArtist || 'Artista',
-            url: track.previewUrl,
+            id: 'audius-' + track.id,
+            title: track.title || searchTitle,
+            artist: track.user?.name || fallbackArtist || 'Audius Artist',
+            url: `https://discoveryprovider.audius.co/v1/tracks/${track.id}/stream?app_name=pulsecord`,
             originalUrl: q,
-            cover: track.artworkUrl100?.replace('100x100bb', '600x600bb') || fallbackCover || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
-            duration: 30,
-            source: isSpotify ? 'spotify' : isYouTube ? 'youtube' : 'itunes'
+            cover: track.artwork?.['480x480'] || track.artwork?.['150x150'] || fallbackCover || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+            duration: track.duration || 0,
+            source: 'audius'
           };
         }
       }
     } catch (err) {
-      console.warn('[MusicBot] iTunes audio resolution error:', err.message);
+      console.warn('[MusicBot] Audius audio resolution error:', err.message);
     }
 
     // 6. Check preset keywords
@@ -223,7 +222,7 @@ class MusicBotManager {
       title: searchTitle,
       artist: fallbackArtist || 'PulseCord Radio',
       cover: fallbackCover || randomPreset.cover,
-      source: 'search'
+      source: 'radio'
     };
   }
 
@@ -231,6 +230,62 @@ class MusicBotManager {
     if (!query || !query.trim()) return [];
     const searchTitle = query.trim();
     const results = [];
+
+    // 1. Try SoundCloud multi-search
+    try {
+      await ensureSoundCloud();
+      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 5 });
+      if (scResults && scResults.length > 0) {
+        for (let i = 0; i < scResults.length; i++) {
+          const track = scResults[i];
+          try {
+            const stream = await play_dl.stream(track.url);
+            if (stream && stream.url) {
+              results.push({
+                id: 'sc-' + Date.now() + '-' + i,
+                title: track.name || searchTitle,
+                artist: track.user?.name || 'SoundCloud Artist',
+                url: stream.url,
+                originalUrl: track.url,
+                cover: track.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+                duration: track.durationInSec || 0,
+                source: 'soundcloud'
+              });
+            }
+          } catch (e) {}
+        }
+        if (results.length > 0) return results;
+      }
+    } catch (err) {
+      console.warn('[MusicBot] SoundCloud search error:', err.message);
+    }
+
+    // 2. Try Audius search (Full songs)
+    try {
+      const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(searchTitle)}&app_name=pulsecord`);
+      if (audiusRes.ok) {
+        const audiusData = await audiusRes.json();
+        if (audiusData.data && audiusData.data.length > 0) {
+          audiusData.data.slice(0, 5).forEach((track, i) => {
+            results.push({
+              id: 'audius-' + track.id + '-' + i,
+              title: track.title || searchTitle,
+              artist: track.user?.name || 'Audius Artist',
+              url: `https://discoveryprovider.audius.co/v1/tracks/${track.id}/stream?app_name=pulsecord`,
+              originalUrl: searchTitle,
+              cover: track.artwork?.['480x480'] || track.artwork?.['150x150'] || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+              duration: track.duration || 0,
+              source: 'audius'
+            });
+          });
+          if (results.length > 0) return results;
+        }
+      }
+    } catch (err) {
+      console.warn('[MusicBot] Audius search error:', err.message);
+    }
+
+    // 3. Fallback: Search iTunes (Full resolution metadata)
     try {
       const iTunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTitle)}&media=music&limit=5`;
       const res = await fetch(iTunesUrl);
