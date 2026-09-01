@@ -1,5 +1,9 @@
 import { MusicBotManager, PRESET_STREAMS } from './musicService.js';
 import { StorageManager } from './storage.js';
+import { OAuth2Client } from 'google-auth-library';
+
+const GOOGLE_CLIENT_ID = '405787129624-ttiutf9ifmvoscr1skm302f2du5ahko7.apps.googleusercontent.com';
+const googleOAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // In-Memory & Persistent Database
 const DEFAULT_ROLES = [
@@ -99,14 +103,14 @@ export async function setupSignaling(io) {
     {
       id: 'msg-welcome',
       author: {
-        id: 'bot-pulse',
-        username: 'PulseBot',
-        avatar: 'PB',
+        id: 'bot-voxel',
+        username: 'VoxelBot',
+        avatar: 'VX',
         roleColor: '#6366f1',
         roleName: 'SISTEMA',
         isBot: true
       },
-      content: 'Bem-vindo ao **PulseCord**! Voz em tempo real com supressão de ruído inteligente, compartilhamento em 60fps e bot de música integrado (Spotify, YouTube, SoundCloud).',
+      content: 'Bem-vindo ao **Voxel**! Voz em tempo real com supressão de ruído inteligente, compartilhamento em 60fps e bot de música integrado (Spotify, YouTube, SoundCloud).',
       timestamp: new Date(Date.now() - 3600000).toISOString(),
       attachments: []
     }
@@ -198,33 +202,45 @@ export async function setupSignaling(io) {
       .map(formatServerWithMembers);
   };
 
-  // 1-Hour Image Attachment Auto-Deletion routine
-  const pruneOldAttachments = () => {
+  // In-memory DM Conversations: dmId -> { id, participants: [userId1, userId2], updatedAt }
+  const dmConversations = new Map();
+
+  // 1-Hour Temporary Messages Auto-Deletion routine (Preserves Pinned Messages)
+  const pruneOldMessages = () => {
     const now = Date.now();
     const ONE_HOUR = 60 * 60 * 1000;
-    let prunedCount = 0;
+    let prunedMessagesCount = 0;
 
     for (const [channelId, msgs] of messageHistory.entries()) {
-      msgs.forEach((msg) => {
-        if (msg.attachments && msg.attachments.length > 0) {
-          const msgTime = new Date(msg.timestamp).getTime();
-          if (now - msgTime > ONE_HOUR) {
-            msg.attachments = [];
-            msg.attachmentExpired = true;
-            prunedCount++;
-          }
+      const remaining = msgs.filter((msg) => {
+        // Pinned messages are PERMANENT and will never be deleted
+        if (msg.isPinned || msg.pinned) {
+          return true;
         }
+
+        const msgTime = new Date(msg.timestamp).getTime();
+        const isExpired = now - msgTime > ONE_HOUR;
+        if (isExpired) {
+          prunedMessagesCount++;
+          return false;
+        }
+        return true;
       });
+
+      if (remaining.length !== msgs.length) {
+        messageHistory.set(channelId, remaining);
+      }
     }
 
-    if (prunedCount > 0) {
-      console.log(`[Storage] Auto-pruned ${prunedCount} image attachment(s) older than 1 hour.`);
+    if (prunedMessagesCount > 0) {
+      console.log(`[Lifecycle] Pruned ${prunedMessagesCount} expired message(s) older than 1 hour (Pinned messages kept).`);
       storage.saveData(registeredUsers, servers, messageHistory);
-      io.emit('attachments-pruned');
+      io.emit('messages-pruned');
     }
   };
 
-  setInterval(pruneOldAttachments, 60 * 1000);
+  // Run cleanup every 30 seconds
+  setInterval(pruneOldMessages, 30 * 1000);
 
   io.on('connection', (socket) => {
     console.log(`[Socket Connected] ID: ${socket.id}`);
@@ -232,6 +248,155 @@ export async function setupSignaling(io) {
     // ==========================================
     // 1. AUTHENTICATION & LOGIN / REGISTER
     // ==========================================
+
+    // Google OAuth 2.0 Login & Automatic Account Creation
+    socket.on('auth-google', async (rawInput, callback) => {
+      try {
+        const data = (rawInput && typeof rawInput.credential === 'object') ? rawInput.credential : (rawInput || {});
+        let payload = null;
+
+        if (typeof data.credential === 'string') {
+          try {
+            const ticket = await googleOAuthClient.verifyIdToken({
+              idToken: data.credential,
+              audience: GOOGLE_CLIENT_ID,
+            });
+            payload = ticket.getPayload();
+          } catch (verifyErr) {
+            const parts = data.credential.split('.');
+            if (parts.length === 3) {
+              payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+            }
+          }
+        } else if (data.email) {
+          payload = {
+            email: data.email,
+            name: data.name || data.email.split('@')[0],
+            picture: data.picture || '',
+            sub: data.sub || `g-${Date.now()}`
+          };
+        }
+
+        if (!payload || !payload.email) {
+          return callback && callback({ success: false, error: 'Não foi possível obter dados da conta Google.' });
+        }
+
+        const normEmail = payload.email.trim().toLowerCase();
+        let user = registeredUsers.find(
+          (u) => u.email === normEmail || (u.googleId && u.googleId === payload.sub)
+        );
+
+        // If this is an initial check and the user is NOT registered yet, request onboarding
+        if (!user && data.isInitialCheck) {
+          return callback && callback({
+            success: false,
+            needOnboarding: true,
+            email: normEmail,
+            name: (payload.name || payload.given_name || normEmail.split('@')[0]).trim(),
+            picture: payload.picture || '',
+            sub: payload.sub
+          });
+        }
+
+        const chosenName = (data.chosenUsername || data.username || payload.name || payload.given_name || normEmail.split('@')[0]).trim();
+        const cleanAvatar = chosenName.substring(0, 2).toUpperCase();
+        const chosenColor = data.avatarColor || 'from-indigo-500 to-purple-600';
+        const photoUrl = data.avatarUrl !== undefined ? data.avatarUrl : (data.useGooglePhoto ? (payload.picture || '') : '');
+
+        if (!user) {
+          // Register new user with verified Google info & custom chosen nickname + color
+          user = {
+            id: `usr-g-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            email: normEmail,
+            googleId: payload.sub,
+            password: '',
+            username: chosenName,
+            displayName: chosenName,
+            avatar: cleanAvatar,
+            avatarUrl: photoUrl,
+            avatarColor: chosenColor,
+            token: `tok-g-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
+            createdAt: new Date().toISOString(),
+            serverIds: ['server-1'],
+            isGoogleAuth: true,
+            isVerified: true,
+            bio: '',
+            pronouns: '',
+            customStatus: { text: '', emoji: '' },
+            gameStatus: '',
+            badges: [{ id: 'badge-verified', name: 'Verificado Google', icon: 'BadgeCheck', color: 'text-sky-400' }],
+            bannerUrl: '',
+            avatarDecoration: '',
+            profileEffect: ''
+          };
+
+          registeredUsers.push(user);
+
+          // Add to default community server
+          const defaultServer = servers.find((s) => s.id === 'server-1');
+          if (defaultServer) {
+            if (!defaultServer.memberIds) defaultServer.memberIds = [];
+            if (!defaultServer.memberIds.includes(user.id)) {
+              defaultServer.memberIds.push(user.id);
+            }
+          }
+
+          storage.saveData(registeredUsers, servers, messageHistory);
+          console.log(`[Google Auth] Created new user: ${user.username} (${user.email})`);
+        } else {
+          // Update username, initials and chosen gradient
+          if (data.chosenUsername || data.username) {
+            user.username = chosenName;
+            user.displayName = chosenName;
+            user.avatar = cleanAvatar;
+          }
+          if (data.avatarColor) {
+            user.avatarColor = chosenColor;
+          }
+          if (data.avatarUrl !== undefined) {
+            user.avatarUrl = data.avatarUrl;
+          } else if (data.useGooglePhoto) {
+            user.avatarUrl = payload.picture || '';
+          }
+          if (!user.googleId) {
+            user.googleId = payload.sub;
+          }
+          storage.saveData(registeredUsers, servers, messageHistory);
+          console.log(`[Google Auth] Logged in existing user: ${user.username} (${user.email})`);
+        }
+
+        // Activate session for this socket
+        const activeUser = {
+          ...user,
+          socketId: socket.id,
+          status: 'online',
+          isMuted: false,
+          isDeafened: false,
+          isScreenSharing: false,
+          activeVoiceChannel: null
+        };
+        activeSockets.set(socket.id, activeUser);
+
+        const userServers = getServersForUser(user.id);
+
+        if (callback) {
+          callback({
+            success: true,
+            user: {
+              ...user,
+              password: undefined
+            },
+            servers: userServers,
+            voiceRooms: Object.fromEntries(voiceRooms)
+          });
+        }
+
+        io.emit('user-status-changed', { user: activeUser });
+      } catch (err) {
+        console.error('[Google Auth Error]:', err);
+        if (callback) callback({ success: false, error: 'Erro ao autenticar com o Google.' });
+      }
+    });
 
     // Register New Account
     socket.on('auth-register', ({ email, password, username, avatar, avatarColor }, callback) => {
@@ -493,6 +658,108 @@ export async function setupSignaling(io) {
     });
 
     // ==========================================
+    // DELETE ACCOUNT & CASCADE DATA PURGE
+    // ==========================================
+    socket.on('delete-account', ({ confirmUsername }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) {
+        return callback && callback({ success: false, error: 'Usuário não autenticado.' });
+      }
+
+      if (!confirmUsername || confirmUsername.trim() !== activeUser.username) {
+        return callback && callback({
+          success: false,
+          error: `O nome digitado não confere. Digite exatamente "${activeUser.username}".`
+        });
+      }
+
+      const userId = activeUser.id;
+
+      try {
+        // 1. Remove user from registered users
+        const userIndex = registeredUsers.findIndex((u) => u.id === userId);
+        if (userIndex !== -1) {
+          registeredUsers.splice(userIndex, 1);
+        }
+
+        // 2. Identify owned servers and delete them completely
+        const ownedServers = servers.filter((s) => s.ownerId === userId);
+        ownedServers.forEach((ownedServer) => {
+          if (ownedServer.channels) {
+            ownedServer.channels.forEach((c) => {
+              messageHistory.delete(c.id);
+            });
+          }
+          io.emit('server-deleted', { serverId: ownedServer.id });
+        });
+
+        // Retain only servers not owned by this user
+        const remainingServers = servers.filter((s) => s.ownerId !== userId);
+        servers.length = 0;
+        servers.push(...remainingServers);
+
+        // 3. Remove user membership and roles from all remaining servers
+        servers.forEach((s) => {
+          if (s.memberIds) {
+            s.memberIds = s.memberIds.filter((id) => id !== userId);
+          }
+          if (s.members) {
+            s.members = s.members.filter((m) => m.id !== userId);
+          }
+        });
+
+        // 4. Delete all messages authored by this user across all channels and DMs
+        for (const [channelId, msgs] of messageHistory.entries()) {
+          const filtered = msgs.filter((m) => m.author?.id !== userId && m.authorId !== userId);
+          messageHistory.set(channelId, filtered);
+        }
+
+        // 5. Remove user from voice rooms if currently in a voice call
+        if (activeUser.activeVoiceChannel) {
+          const roomUsers = voiceRooms.get(activeUser.activeVoiceChannel) || [];
+          const updatedRoom = roomUsers.filter((u) => u.id !== userId);
+          if (updatedRoom.length > 0) {
+            voiceRooms.set(activeUser.activeVoiceChannel, updatedRoom);
+          } else {
+            voiceRooms.delete(activeUser.activeVoiceChannel);
+          }
+          io.emit('voice-room-updated', {
+            channelId: activeUser.activeVoiceChannel,
+            users: updatedRoom
+          });
+        }
+
+        // 6. Delete all direct message conversations involving this user
+        for (const [dmId, dm] of dmConversations.entries()) {
+          if (dm.participants?.includes(userId)) {
+            dmConversations.delete(dmId);
+            messageHistory.delete(dmId);
+          }
+        }
+
+        // 7. Save clean state to persistent storage (Redis & JSON)
+        storage.saveData(registeredUsers, servers, messageHistory);
+
+        // 8. Remove active socket
+        activeSockets.delete(socket.id);
+
+        console.log(`[Account Deleted] User ${activeUser.username} (${userId}) and all associated data permanently deleted.`);
+
+        if (callback) {
+          callback({ success: true, message: 'Conta excluída com sucesso.' });
+        }
+
+        io.emit('user-deleted', { userId });
+        io.emit('user-status-changed', { user: { ...activeUser, status: 'offline' } });
+      } catch (err) {
+        console.error('[Delete Account Error]:', err);
+        if (callback) {
+          callback({ success: false, error: 'Erro ao excluir conta do servidor.' });
+        }
+      }
+    });
+
+    // ==========================================
     // 2. ISOLATED SERVERS & CHANNELS
     // ==========================================
 
@@ -584,13 +851,133 @@ export async function setupSignaling(io) {
     });
 
     // ==========================================
-    // 3. TEXT CHAT & MESSAGES
+    // 3. TEXT CHAT, DIRECT MESSAGES & PINNING
     // ==========================================
     socket.on('fetch-messages', ({ channelId }, callback) => {
       const msgs = messageHistory.get(channelId) || [];
       if (callback) callback(msgs);
     });
 
+    // Fetch DMs for the current user
+    socket.on('fetch-dms', (callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback([]);
+
+      const userDMs = [];
+      for (const [dmId, dmData] of dmConversations.entries()) {
+        if (dmData.participants.includes(user.id)) {
+          const otherUserId = dmData.participants.find(id => id !== user.id) || user.id;
+          const otherUser = registeredUsers.find(u => u.id === otherUserId) || 
+                            Array.from(activeSockets.values()).find(act => act.id === otherUserId) ||
+                            { id: otherUserId, username: 'Usuário', displayName: 'Usuário' };
+
+          const msgs = messageHistory.get(dmId) || [];
+          const lastMsg = msgs[msgs.length - 1];
+
+          userDMs.push({
+            id: dmId,
+            type: 'dm',
+            name: otherUser.displayName || otherUser.username,
+            recipient: sanitizeUser(otherUser),
+            participants: dmData.participants,
+            lastMessage: lastMsg ? lastMsg.content || (lastMsg.attachments?.length ? 'Arquivo anexo' : '') : '',
+            updatedAt: dmData.updatedAt
+          });
+        }
+      }
+
+      // Sort by most recent
+      userDMs.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+      if (callback) callback(userDMs);
+    });
+
+    // Open or create DM with target user
+    socket.on('open-or-create-dm', ({ targetUserId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      const sortedIds = [user.id, targetUserId].sort();
+      const dmId = `dm-${sortedIds[0]}_${sortedIds[1]}`;
+
+      const otherUser = registeredUsers.find(u => u.id === targetUserId) || 
+                        Array.from(activeSockets.values()).find(act => act.id === targetUserId) ||
+                        { id: targetUserId, username: 'Usuário', displayName: 'Usuário' };
+
+      const dmRecord = {
+        id: dmId,
+        participants: [user.id, targetUserId],
+        updatedAt: new Date().toISOString()
+      };
+      dmConversations.set(dmId, dmRecord);
+
+      const dmPayload = {
+        id: dmId,
+        type: 'dm',
+        name: otherUser.displayName || otherUser.username,
+        recipient: sanitizeUser(otherUser),
+        participants: [user.id, targetUserId]
+      };
+
+      socket.join(dmId);
+
+      // Also join target user's active sockets if online
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === targetUserId) {
+          const targetSocket = io.sockets.sockets.get(sockId);
+          if (targetSocket) {
+            targetSocket.join(dmId);
+            targetSocket.emit('dm-received', {
+              id: dmId,
+              type: 'dm',
+              name: user.displayName || user.username,
+              recipient: sanitizeUser(user),
+              participants: [user.id, targetUserId]
+            });
+          }
+        }
+      }
+
+      if (callback) callback({ success: true, dm: dmPayload });
+    });
+
+    // Pin Message (Permanent, survives 1h auto-deletion)
+    socket.on('pin-message', ({ channelId, messageId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      const msgs = messageHistory.get(channelId) || [];
+      const msg = msgs.find(m => m.id === messageId);
+
+      if (msg) {
+        msg.isPinned = true;
+        msg.pinnedAt = new Date().toISOString();
+        msg.pinnedBy = user?.username || 'Usuário';
+
+        storage.saveData(registeredUsers, servers, messageHistory);
+        io.emit('message-pinned', { channelId, messageId, message: msg });
+        if (callback) callback({ success: true, message: msg });
+      } else {
+        if (callback) callback({ success: false, error: 'Mensagem não encontrada' });
+      }
+    });
+
+    // Unpin Message
+    socket.on('unpin-message', ({ channelId, messageId }, callback) => {
+      const msgs = messageHistory.get(channelId) || [];
+      const msg = msgs.find(m => m.id === messageId);
+
+      if (msg) {
+        msg.isPinned = false;
+        delete msg.pinnedAt;
+        delete msg.pinnedBy;
+
+        storage.saveData(registeredUsers, servers, messageHistory);
+        io.emit('message-unpinned', { channelId, messageId });
+        if (callback) callback({ success: true });
+      } else {
+        if (callback) callback({ success: false, error: 'Mensagem não encontrada' });
+      }
+    });
+
+    // Send message (Handles Channels & DMs)
     socket.on('send-message', ({ channelId, content, attachments }) => {
       const user = activeSockets.get(socket.id);
       if (!user || (!content?.trim() && (!attachments || attachments.length === 0))) return;
@@ -603,7 +990,9 @@ export async function setupSignaling(io) {
         author: {
           id: user.id,
           username: user.username,
+          displayName: user.displayName || user.username,
           avatar: user.avatar,
+          avatarUrl: user.avatarUrl || null,
           avatarColor: user.avatarColor,
           roleId: user.roleId,
           roleColor: role.color,
@@ -612,6 +1001,7 @@ export async function setupSignaling(io) {
         content: content || '',
         attachments: attachments || [],
         timestamp: new Date().toISOString(),
+        isPinned: false,
         reactions: []
       };
 
@@ -624,11 +1014,43 @@ export async function setupSignaling(io) {
         messageHistory.get(channelId).shift();
       }
 
+      // Update DM timestamp if it's a DM
+      if (channelId.startsWith('dm-') && dmConversations.has(channelId)) {
+        dmConversations.get(channelId).updatedAt = new Date().toISOString();
+      }
+
       storage.saveData(registeredUsers, servers, messageHistory);
       io.emit('new-message', message);
 
       if (content && content.startsWith('/')) {
         handleBotCommand(channelId, content, user, io, musicBot, messageHistory, storage, servers, registeredUsers);
+      }
+    });
+
+    // Pin Message
+    socket.on('pin-message', ({ channelId, messageId }) => {
+      const msgs = messageHistory.get(channelId) || [];
+      const msg = msgs.find((m) => m.id === messageId);
+      if (msg) {
+        msg.isPinned = true;
+        msg.pinnedAt = new Date().toISOString();
+        const user = activeSockets.get(socket.id);
+        msg.pinnedBy = user ? (user.displayName || user.username) : 'Usuário';
+        storage.saveData(registeredUsers, servers, messageHistory);
+        io.emit('message-pinned', { channelId, messageId, message: msg });
+      }
+    });
+
+    // Unpin Message
+    socket.on('unpin-message', ({ channelId, messageId }) => {
+      const msgs = messageHistory.get(channelId) || [];
+      const msg = msgs.find((m) => m.id === messageId);
+      if (msg) {
+        msg.isPinned = false;
+        delete msg.pinnedAt;
+        delete msg.pinnedBy;
+        storage.saveData(registeredUsers, servers, messageHistory);
+        io.emit('message-unpinned', { channelId, messageId });
       }
     });
 
@@ -684,6 +1106,98 @@ export async function setupSignaling(io) {
       if (user && user.activeVoiceChannel) {
         leaveCurrentVoice(socket, user, io, voiceRooms);
       }
+    });
+
+    // Move a user to another voice channel (Permissions: Server Owner, Admin, Mod, or Move Members role)
+    socket.on('move-voice-user', ({ targetUserId, targetChannelId, serverId }, callback) => {
+      const caller = activeSockets.get(socket.id);
+      if (!caller) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      // Permission check: Owner, Admin, Mod, or self
+      const server = servers.find((s) => s.id === serverId);
+      const isOwner = server && server.ownerId === caller.id;
+      const isAdminOrMod = caller.roleId === 'role-admin' || caller.roleId === 'role-mod' || caller.id === 'usr-admin';
+      
+      if (!isOwner && !isAdminOrMod && caller.id !== targetUserId) {
+        return callback && callback({ success: false, error: 'Sem permissão para mover membros de canal.' });
+      }
+
+      // Find target user
+      let targetSocket = null;
+      let targetUser = null;
+      for (const [sockId, u] of activeSockets.entries()) {
+        if (u.id === targetUserId || u.socketId === targetUserId) {
+          targetSocket = io.sockets.sockets.get(sockId);
+          targetUser = u;
+          break;
+        }
+      }
+
+      if (!targetUser) {
+        return callback && callback({ success: false, error: 'Usuário não encontrado' });
+      }
+
+      // Leave old voice room if in one
+      const oldChannelId = targetUser.activeVoiceChannel;
+      if (oldChannelId) {
+        const oldRoom = voiceRooms.get(oldChannelId) || [];
+        voiceRooms.set(oldChannelId, oldRoom.filter((u) => u.id !== targetUser.id));
+        if (targetSocket) {
+          targetSocket.leave(`voice-${oldChannelId}`);
+          targetSocket.to(`voice-${oldChannelId}`).emit('user-left-voice', {
+            socketId: targetSocket.id,
+            userId: targetUser.id,
+            channelId: oldChannelId
+          });
+        }
+      }
+
+      // Join new voice room
+      targetUser.activeVoiceChannel = targetChannelId;
+      if (!voiceRooms.has(targetChannelId)) {
+        voiceRooms.set(targetChannelId, []);
+      }
+      voiceRooms.get(targetChannelId).push(targetUser);
+
+      if (targetSocket) {
+        targetSocket.join(`voice-${targetChannelId}`);
+        targetSocket.emit('moved-to-voice-channel', { channelId: targetChannelId, serverId });
+        targetSocket.to(`voice-${targetChannelId}`).emit('user-joined-voice', {
+          user: targetUser,
+          channelId: targetChannelId
+        });
+      }
+
+      io.emit('voice-rooms-updated', {
+        voiceRooms: Object.fromEntries(voiceRooms)
+      });
+
+      if (callback) callback({ success: true });
+    });
+
+    // Disconnect a user from voice channel (Owner / Admin / Mod)
+    socket.on('disconnect-voice-user', ({ targetUserId, serverId }, callback) => {
+      const caller = activeSockets.get(socket.id);
+      if (!caller) return;
+      const server = servers.find((s) => s.id === serverId);
+      const isOwner = server && server.ownerId === caller.id;
+      const isAdminOrMod = caller.roleId === 'role-admin' || caller.roleId === 'role-mod' || caller.id === 'usr-admin';
+
+      if (!isOwner && !isAdminOrMod) {
+        return callback && callback({ success: false, error: 'Sem permissão.' });
+      }
+
+      for (const [sockId, u] of activeSockets.entries()) {
+        if (u.id === targetUserId) {
+          const targetSocket = io.sockets.sockets.get(sockId);
+          if (targetSocket) {
+            leaveCurrentVoice(targetSocket, u, io, voiceRooms);
+            targetSocket.emit('force-disconnected-from-voice');
+          }
+          break;
+        }
+      }
+      if (callback) callback({ success: true });
     });
 
     socket.on('webrtc-offer', ({ targetSocketId, offer, isScreenShare }) => {
