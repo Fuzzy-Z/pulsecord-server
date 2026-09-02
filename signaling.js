@@ -245,6 +245,18 @@ export async function setupSignaling(io) {
   io.on('connection', (socket) => {
     console.log(`[Socket Connected] ID: ${socket.id}`);
 
+    // Immediately send current voice rooms to newly connected client
+    socket.emit('voice-rooms-updated', {
+      voiceRooms: Object.fromEntries(voiceRooms)
+    });
+
+    // Allow client to explicitly request voice rooms sync at any time
+    socket.on('sync-voice-rooms', (callback) => {
+      const data = Object.fromEntries(voiceRooms);
+      socket.emit('voice-rooms-updated', { voiceRooms: data });
+      if (callback) callback({ success: true, voiceRooms: data });
+    });
+
     // ==========================================
     // 1. AUTHENTICATION & LOGIN / REGISTER
     // ==========================================
