@@ -21,7 +21,6 @@ export class StorageManager {
     this.redisClient = null;
     this.upstashClient = null;
     this.useRedis = false;
-    this.initStorage();
   }
 
   async initStorage() {

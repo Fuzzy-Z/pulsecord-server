@@ -133,6 +133,9 @@ export async function setupSignaling(io) {
     }
   ]);
 
+  // Initialize storage connection
+  await storage.initStorage();
+
   // Load persisted database (from Redis if available, or pulsecord-db.json)
   const loadedData = await storage.loadInitialData(INITIAL_SERVERS, initialHistory);
   let registeredUsers = loadedData.users || [];
