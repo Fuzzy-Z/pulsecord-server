@@ -1288,7 +1288,7 @@ export async function setupSignaling(io) {
         // 5. Music Bot Direct Controls
         socket.on('music-search', async ({ query }, callback) => {
           try {
-            const results = await musicBot.search(query);
+            const results = await musicBot.searchTracks(query);
             callback({ success: true, results });
           } catch (err) {
             callback({ success: false, error: err.message });
