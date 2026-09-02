@@ -1051,9 +1051,6 @@ export async function setupSignaling(io) {
         delete msg.pinnedBy;
         storage.saveData(registeredUsers, servers, messageHistory);
         io.emit('message-unpinned', { channelId, messageId });
-      }
-    });
-
     // ==========================================
     // 4. VOICE CHANNELS & WEBRTC
     // ==========================================
@@ -1061,8 +1058,23 @@ export async function setupSignaling(io) {
       const user = activeSockets.get(socket.id);
       if (!user) return;
 
-      if (user.activeVoiceChannel && user.activeVoiceChannel !== channelId) {
-        leaveCurrentVoice(socket, user, io, voiceRooms);
+      // Clean this user from ANY voice room they might previously be in
+      for (const [rId, rUsers] of voiceRooms.entries()) {
+        const hasUser = rUsers.some((u) => u.id === user.id || u.socketId === socket.id);
+        if (hasUser) {
+          const filtered = rUsers.filter((u) => u.id !== user.id && u.socketId !== socket.id);
+          if (filtered.length === 0) {
+            voiceRooms.delete(rId);
+          } else {
+            voiceRooms.set(rId, filtered);
+          }
+          socket.leave(`voice-${rId}`);
+          socket.to(`voice-${rId}`).emit('user-left-voice', {
+            socketId: socket.id,
+            userId: user.id,
+            channelId: rId
+          });
+        }
       }
 
       user.activeVoiceChannel = channelId;
@@ -1073,7 +1085,7 @@ export async function setupSignaling(io) {
       }
 
       const roomUsers = voiceRooms.get(channelId);
-      const existingIdx = roomUsers.findIndex((u) => u.id === user.id);
+      const existingIdx = roomUsers.findIndex((u) => u.id === user.id || u.socketId === socket.id);
       if (existingIdx !== -1) roomUsers.splice(existingIdx, 1);
 
       roomUsers.push(user);
@@ -1090,7 +1102,7 @@ export async function setupSignaling(io) {
       if (callback) {
         callback({
           success: true,
-          usersInRoom: roomUsers.filter((u) => u.socketId !== socket.id),
+          usersInRoom: roomUsers.filter((u) => u.socketId !== socket.id && u.id !== user.id),
           musicPlayer,
           watchTogether
         });
@@ -1103,9 +1115,7 @@ export async function setupSignaling(io) {
 
     socket.on('leave-voice', () => {
       const user = activeSockets.get(socket.id);
-      if (user && user.activeVoiceChannel) {
-        leaveCurrentVoice(socket, user, io, voiceRooms);
-      }
+      leaveCurrentVoice(socket, user, io, voiceRooms);
     });
 
     // Move a user to another voice channel (Permissions: Server Owner, Admin, Mod, or Move Members role)
@@ -1141,7 +1151,7 @@ export async function setupSignaling(io) {
       const oldChannelId = targetUser.activeVoiceChannel;
       if (oldChannelId) {
         const oldRoom = voiceRooms.get(oldChannelId) || [];
-        voiceRooms.set(oldChannelId, oldRoom.filter((u) => u.id !== targetUser.id));
+        voiceRooms.set(oldChannelId, oldRoom.filter((u) => u.id !== targetUser.id && u.socketId !== targetUser.socketId));
         if (targetSocket) {
           targetSocket.leave(`voice-${oldChannelId}`);
           targetSocket.to(`voice-${oldChannelId}`).emit('user-left-voice', {
@@ -1157,7 +1167,9 @@ export async function setupSignaling(io) {
       if (!voiceRooms.has(targetChannelId)) {
         voiceRooms.set(targetChannelId, []);
       }
-      voiceRooms.get(targetChannelId).push(targetUser);
+      const newRoom = voiceRooms.get(targetChannelId).filter((u) => u.id !== targetUser.id && u.socketId !== targetUser.socketId);
+      newRoom.push(targetUser);
+      voiceRooms.set(targetChannelId, newRoom);
 
       if (targetSocket) {
         targetSocket.join(`voice-${targetChannelId}`);
@@ -1258,19 +1270,14 @@ export async function setupSignaling(io) {
     // 5. Music Bot Direct Controls
     socket.on('music-search', async ({ query }, callback) => {
       try {
-        const results = await musicBot.searchTracks(query);
-        if (callback) callback({ success: true, results });
+        const results = await musicBot.search(query);
+        callback({ success: true, results });
       } catch (err) {
-        if (callback) callback({ success: false, error: err.message });
+        callback({ success: false, error: err.message });
       }
     });
 
     socket.on('music-control', async ({ action, channelId, query, volume }) => {
-      const user = activeSockets.get(socket.id);
-      const targetChannel = channelId || (user ? user.activeVoiceChannel : null);
-      if (!targetChannel) return;
-
-      switch (action) {
         case 'play':
           await musicBot.play(targetChannel, query || 'lofi', user);
           break;
@@ -1386,28 +1393,34 @@ export async function setupSignaling(io) {
 }
 
 function leaveCurrentVoice(socket, user, io, voiceRooms) {
-  const channelId = user.activeVoiceChannel;
-  if (!channelId) return;
+  const socketId = socket?.id;
+  const userId = user?.id;
 
-  socket.leave(`voice-${channelId}`);
-  user.activeVoiceChannel = null;
-  user.isScreenSharing = false;
+  for (const [channelId, room] of voiceRooms.entries()) {
+    const hasMatch = room.some((u) => (socketId && u.socketId === socketId) || (userId && u.id === userId));
+    if (hasMatch) {
+      const updated = room.filter((u) => (!socketId || u.socketId !== socketId) && (!userId || u.id !== userId));
+      if (updated.length === 0) {
+        voiceRooms.delete(channelId);
+      } else {
+        voiceRooms.set(channelId, updated);
+      }
 
-  if (voiceRooms.has(channelId)) {
-    const room = voiceRooms.get(channelId);
-    const updated = room.filter((u) => u.socketId !== socket.id);
-    if (updated.length === 0) {
-      voiceRooms.delete(channelId);
-    } else {
-      voiceRooms.set(channelId, updated);
+      if (socket) {
+        socket.leave(`voice-${channelId}`);
+        socket.to(`voice-${channelId}`).emit('user-left-voice', {
+          socketId: socketId,
+          userId: userId || 'unknown',
+          channelId
+        });
+      }
     }
   }
 
-  socket.to(`voice-${channelId}`).emit('user-left-voice', {
-    socketId: socket.id,
-    userId: user.id,
-    channelId
-  });
+  if (user) {
+    user.activeVoiceChannel = null;
+    user.isScreenSharing = false;
+  }
 
   io.emit('voice-rooms-updated', {
     voiceRooms: Object.fromEntries(voiceRooms)
