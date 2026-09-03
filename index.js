@@ -58,19 +58,23 @@ app.get('/api/health', (req, res) => {
 });
 
 // OTA In-App Auto-Updater Endpoints
+const GITHUB_CDN_ASAR = 'https://raw.githubusercontent.com/Fuzzy-Z/pulsecord-server/main/app.asar';
+
 app.get('/api/version', (req, res) => {
   if (fs.existsSync(VERSION_FILE)) {
     try {
       const data = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'));
-      data.hasAsar = fs.existsSync(ASAR_FILE);
+      data.hasAsar = true;
+      data.asarUrl = GITHUB_CDN_ASAR;
       return res.json(data);
     } catch (e) {}
   }
   res.json({
-    version: '1.0.1',
+    version: '1.0.43',
     releaseDate: new Date().toISOString(),
-    hasAsar: fs.existsSync(ASAR_FILE),
-    notes: 'Versão estável com suporte a Upstash Redis e salas de voz em tempo real.'
+    hasAsar: true,
+    asarUrl: GITHUB_CDN_ASAR,
+    notes: 'Atualização com melhorias de voz e estabilidade no Voxel.'
   });
 });
 
@@ -78,10 +82,10 @@ app.get('/api/update/app.asar', (req, res) => {
   if (fs.existsSync(ASAR_FILE)) {
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', 'attachment; filename="app.asar"');
-    res.sendFile(ASAR_FILE);
-  } else {
-    res.status(404).json({ error: 'Nenhum pacote app.asar disponível para download no servidor.' });
+    return res.sendFile(ASAR_FILE);
   }
+  // Redirect to GitHub CDN where app.asar is reliably hosted
+  res.redirect(302, GITHUB_CDN_ASAR);
 });
 
 // SPA fallback for web browser access
