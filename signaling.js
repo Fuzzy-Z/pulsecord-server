@@ -136,7 +136,7 @@ export async function setupSignaling(io) {
   // Initialize storage connection
   await storage.initStorage();
 
-  // Load persisted database (from Redis if available, or pulsecord-db.json)
+  // Load persisted database directly from Redis / Upstash
   const loadedData = await storage.loadInitialData(INITIAL_SERVERS, initialHistory);
   let registeredUsers = loadedData.users || [];
   let servers = loadedData.servers || INITIAL_SERVERS;
@@ -167,7 +167,48 @@ export async function setupSignaling(io) {
     };
   };
 
+  const decodeInviteToId = (inviteInput) => {
+    if (!inviteInput || typeof inviteInput !== 'string') return null;
+    let cleaned = inviteInput.trim();
+    const match = cleaned.match(/invite\/([a-zA-Z0-9_-]+)/i);
+    if (match) cleaned = match[1];
+    cleaned = cleaned.replace(/^PC-?/i, '').trim();
+
+    if (cleaned.startsWith('server-')) return cleaned;
+    if (/^\d{12,}$/.test(cleaned)) return `server-${cleaned}`;
+    if (cleaned.toLowerCase() === 'community' || cleaned === '1') return 'server-1';
+
+    try {
+      const num = parseInt(cleaned, 36);
+      if (!isNaN(num) && num > 1000000000000) {
+        return `server-${num}`;
+      }
+    } catch (e) {}
+
+    return cleaned;
+  };
+
+  const encodeServerToInvite = (server) => {
+    if (!server) return 'VOXEL';
+    if (server.id === 'server-1') return 'COMMUNITY';
+    if (server.inviteCode) return server.inviteCode.toUpperCase();
+    const raw = (server.id || '').replace(/^server-/, '');
+    const num = parseInt(raw, 10);
+    if (!isNaN(num) && num > 1000000000000) {
+      return num.toString(36).toUpperCase();
+    }
+    return raw.substring(0, 8).toUpperCase() || 'VOXEL';
+  };
+
+  const generateInviteCode = (server = null) => {
+    return encodeServerToInvite(server);
+  };
+
   const formatServerWithMembers = (s) => {
+    s.memberRoles = s.memberRoles || {};
+    if (!s.inviteCode) {
+      s.inviteCode = encodeServerToInvite(s);
+    }
     let memberList = [];
     if (s.id === 'server-1') {
       const allKnown = [...registeredUsers];
@@ -176,13 +217,29 @@ export async function setupSignaling(io) {
           allKnown.push(act);
         }
       }
-      memberList = allKnown.map(sanitizeUser).filter(Boolean);
+      memberList = allKnown.map((u) => {
+        const sanitized = sanitizeUser(u);
+        if (!sanitized) return null;
+        const isOwner = u.id === s.ownerId;
+        const roleId = s.memberRoles[u.id] || (isOwner ? 'role-admin' : 'role-member');
+        return {
+          ...sanitized,
+          roleId
+        };
+      }).filter(Boolean);
     } else {
       const ids = new Set([s.ownerId, ...(s.memberIds || [])]);
       memberList = Array.from(ids)
         .map((id) => {
           const u = registeredUsers.find((r) => r.id === id) || Array.from(activeSockets.values()).find((act) => act.id === id);
-          return sanitizeUser(u);
+          const sanitized = sanitizeUser(u);
+          if (!sanitized) return null;
+          const isOwner = id === s.ownerId;
+          const roleId = s.memberRoles[id] || (isOwner ? 'role-admin' : 'role-member');
+          return {
+            ...sanitized,
+            roleId
+          };
         })
         .filter(Boolean);
     }
@@ -570,7 +627,7 @@ export async function setupSignaling(io) {
       const activeUser = {
         ...user,
         socketId: socket.id,
-        status: 'online',
+        status: user.status || 'online',
         isMuted: false,
         isDeafened: false,
         isScreenSharing: false,
@@ -605,7 +662,7 @@ export async function setupSignaling(io) {
       const activeUser = {
         ...user,
         socketId: socket.id,
-        status: 'online',
+        status: user.status || 'online',
         isMuted: false,
         isDeafened: false,
         isScreenSharing: false,
@@ -635,7 +692,7 @@ export async function setupSignaling(io) {
       const activeUser = activeSockets.get(socket.id);
       if (!activeUser) return callback && callback({ success: false, error: 'Not authenticated' });
 
-      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'username', 'appTheme', 'compactMode', 'clipSettings'];
+      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'username', 'appTheme', 'compactMode', 'clipSettings', 'status'];
 
       const userIndex = registeredUsers.findIndex(u => u.id === activeUser.id);
 
@@ -662,10 +719,18 @@ export async function setupSignaling(io) {
 
       // Broadcast to everyone
       io.emit('user-profile-updated', { user: activeUser });
+      io.emit('user-status-changed', { user: activeUser });
 
       if (callback) {
         if (userIndex !== -1) {
-          callback({ success: true, user: { ...registeredUsers[userIndex], password: undefined } });
+          callback({
+            success: true,
+            user: {
+              ...registeredUsers[userIndex],
+              password: undefined,
+              status: activeUser.status || 'online'
+            }
+          });
         } else {
           callback({ success: true, user: activeUser });
         }
@@ -789,6 +854,9 @@ export async function setupSignaling(io) {
         icon: icon || (name ? name.substring(0, 2).toUpperCase() : 'PC'),
         ownerId: user.id,
         memberIds: [user.id],
+        memberRoles: {
+          [user.id]: 'role-admin'
+        },
         roles: JSON.parse(JSON.stringify(DEFAULT_ROLES)),
         channels: [
           { id: `c-${Date.now()}-1`, name: 'geral', type: 'text', topic: 'Boas vindas ao novo servidor!' },
@@ -813,14 +881,26 @@ export async function setupSignaling(io) {
       if (callback) callback(formattedNew);
     });
 
-    // Join an Existing Server by Server ID
+    // Join an Existing Server by Server ID or Invite Code
     socket.on('join-server', ({ serverId }, callback) => {
       const user = activeSockets.get(socket.id);
-      if (!user) return;
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
 
-      const targetServer = servers.find((s) => s.id === serverId);
+      const decodedId = decodeInviteToId(serverId);
+      let cleaned = (serverId || '').trim();
+      const match = cleaned.match(/invite\/([a-zA-Z0-9_-]+)/i);
+      if (match) cleaned = match[1];
+      cleaned = cleaned.replace(/^PC-?/i, '').trim();
+
+      const targetServer = servers.find((s) =>
+        s.id === serverId ||
+        (decodedId && s.id === decodedId) ||
+        (s.inviteCode && s.inviteCode.toUpperCase() === cleaned.toUpperCase()) ||
+        s.id === cleaned
+      );
+
       if (!targetServer) {
-        return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+        return callback && callback({ success: false, error: 'Servidor não encontrado ou convite expirado.' });
       }
 
       if (!targetServer.memberIds) targetServer.memberIds = [];
@@ -828,16 +908,201 @@ export async function setupSignaling(io) {
         targetServer.memberIds.push(user.id);
       }
 
+      const registered = registeredUsers.find((u) => u.id === user.id);
+      if (registered) {
+        if (!registered.serverIds) registered.serverIds = [];
+        if (!registered.serverIds.includes(targetServer.id)) {
+          registered.serverIds.push(targetServer.id);
+        }
+      }
+
       storage.saveData(registeredUsers, servers, messageHistory);
 
       const formattedTarget = formatServerWithMembers(targetServer);
+
+      io.emit('server-roles-updated', {
+        serverId: targetServer.id,
+        roles: targetServer.roles,
+        server: formattedTarget
+      });
+
       socket.emit('server-created', formattedTarget);
       if (callback) callback({ success: true, server: formattedTarget });
     });
 
+    // Get or Create Invite Code for Server
+    socket.on('get-server-invite', ({ serverId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
+
+      const decodedId = decodeInviteToId(serverId);
+      const targetServer = servers.find((s) => s.id === serverId || (decodedId && s.id === decodedId));
+      if (!targetServer) {
+        return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+      }
+
+      if (!targetServer.inviteCode) {
+        targetServer.inviteCode = encodeServerToInvite(targetServer);
+        storage.saveData(registeredUsers, servers, messageHistory);
+      }
+
+      const memberCount = (targetServer.memberIds?.length || 1);
+      callback && callback({
+        success: true,
+        inviteCode: targetServer.inviteCode,
+        inviteUrl: `https://voxel.gg/invite/${targetServer.inviteCode}`,
+        serverId: targetServer.id,
+        serverName: targetServer.name,
+        serverIcon: targetServer.icon,
+        memberCount
+      });
+    });
+
+    // Generate New Invite Code for Server
+    socket.on('generate-new-invite', ({ serverId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
+
+      const decodedId = decodeInviteToId(serverId);
+      const targetServer = servers.find((s) => s.id === serverId || (decodedId && s.id === decodedId));
+      if (!targetServer) {
+        return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+      }
+
+      targetServer.inviteCode = encodeServerToInvite(targetServer);
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      const memberCount = (targetServer.memberIds?.length || 1);
+      callback && callback({
+        success: true,
+        inviteCode: targetServer.inviteCode,
+        inviteUrl: `https://voxel.gg/invite/${targetServer.inviteCode}`,
+        serverId: targetServer.id,
+        serverName: targetServer.name,
+        serverIcon: targetServer.icon,
+        memberCount
+      });
+    });
+
+    // Join Server via Invite Code or Link
+    socket.on('join-server-invite', ({ inviteCode }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
+
+      if (!inviteCode || typeof inviteCode !== 'string') {
+        return callback && callback({ success: false, error: 'Código de convite inválido.' });
+      }
+
+      const decodedId = decodeInviteToId(inviteCode);
+      let cleaned = inviteCode.trim();
+      const urlMatch = cleaned.match(/invite\/([a-zA-Z0-9_-]+)/i);
+      if (urlMatch) {
+        cleaned = urlMatch[1];
+      } else {
+        cleaned = cleaned.replace(/^PC-?/i, '').trim();
+      }
+
+      const targetServer = servers.find((s) =>
+        (s.inviteCode && s.inviteCode.toUpperCase() === cleaned.toUpperCase()) ||
+        (decodedId && s.id === decodedId) ||
+        s.id === inviteCode ||
+        s.id === cleaned
+      );
+
+      if (!targetServer) {
+        return callback && callback({ success: false, error: 'Convite inválido ou servidor não encontrado.' });
+      }
+
+      if (!targetServer.memberIds) targetServer.memberIds = [];
+      if (!targetServer.memberIds.includes(user.id)) {
+        targetServer.memberIds.push(user.id);
+      }
+
+      const registered = registeredUsers.find((u) => u.id === user.id);
+      if (registered) {
+        if (!registered.serverIds) registered.serverIds = [];
+        if (!registered.serverIds.includes(targetServer.id)) {
+          registered.serverIds.push(targetServer.id);
+        }
+      }
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      const formattedTarget = formatServerWithMembers(targetServer);
+
+      // Notify other online members of this server
+      io.emit('server-roles-updated', {
+        serverId: targetServer.id,
+        roles: targetServer.roles,
+        server: formattedTarget
+      });
+
+      socket.emit('server-created', formattedTarget);
+      if (callback) callback({ success: true, server: formattedTarget });
+    });
+
+    // Send Server Invite directly via DM to a friend/user
+    socket.on('send-server-invite-dm', ({ targetUserId, serverId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
+
+      const targetServer = servers.find((s) => s.id === serverId);
+      if (!targetServer) {
+        return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+      }
+
+      if (!targetServer.inviteCode) {
+        targetServer.inviteCode = generateInviteCode();
+      }
+
+      const sortedIds = [user.id, targetUserId].sort();
+      const dmId = `dm-${sortedIds[0]}_${sortedIds[1]}`;
+
+      const inviteMsg = {
+        id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+        channelId: dmId,
+        userId: user.id,
+        username: user.username,
+        displayName: user.displayName || user.username,
+        avatarUrl: user.avatarUrl,
+        avatarColor: user.avatarColor,
+        content: `Você foi convidado para participar de **${targetServer.name}**!\nhttps://voxel.gg/invite/${targetServer.inviteCode}`,
+        invite: {
+          code: targetServer.inviteCode,
+          serverId: targetServer.id,
+          serverName: targetServer.name,
+          serverIcon: targetServer.icon,
+          memberCount: (targetServer.memberIds?.length || 1)
+        },
+        timestamp: new Date().toISOString()
+      };
+
+      let history = messageHistory.get(dmId);
+      if (!history) {
+        history = [];
+        messageHistory.set(dmId, history);
+      }
+      history.push(inviteMsg);
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      io.emit('new-message', { channelId: dmId, message: inviteMsg });
+      if (callback) callback({ success: true, message: inviteMsg });
+    });
+
     socket.on('create-channel', ({ serverId, name, type, topic, userLimit }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return;
       const server = servers.find((s) => s.id === serverId);
       if (!server) return;
+
+      const isOwner = server.ownerId === activeUser.id;
+      const callerRoleId = server.memberRoles?.[activeUser.id] || (isOwner ? 'role-admin' : 'role-member');
+      const callerRoleObj = (server.roles || []).find(r => r.id === callerRoleId);
+      const canManageChannels = isOwner || callerRoleObj?.permissions?.administrator || callerRoleObj?.permissions?.manageChannels;
+
+      if (!canManageChannels) {
+        return callback && callback({ error: 'Sem permissão para criar canais.' });
+      }
 
       const newChannel = {
         id: `${type[0]}-${Date.now()}`,
@@ -855,14 +1120,55 @@ export async function setupSignaling(io) {
     });
 
     socket.on('update-roles', ({ serverId, roles }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return;
       const server = servers.find((s) => s.id === serverId);
-      if (server) {
-        server.roles = roles;
-        storage.saveData(registeredUsers, servers, messageHistory);
+      if (!server) return;
 
-        io.emit('server-roles-updated', { serverId, roles });
-        if (callback) callback({ success: true });
+      const isOwner = server.ownerId === activeUser.id;
+      const callerRoleId = server.memberRoles?.[activeUser.id] || (isOwner ? 'role-admin' : 'role-member');
+      const callerRoleObj = (server.roles || []).find(r => r.id === callerRoleId);
+      const hasPermission = isOwner || callerRoleObj?.permissions?.administrator || callerRoleObj?.permissions?.manageRoles;
+
+      if (!hasPermission) {
+        return callback && callback({ success: false, error: 'Sem permissão para alterar cargos.' });
       }
+
+      server.roles = roles;
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      const formattedServer = formatServerWithMembers(server);
+      io.emit('server-roles-updated', { serverId, roles: server.roles, server: formattedServer });
+      if (callback) callback({ success: true, server: formattedServer });
+    });
+
+    socket.on('assign-member-role', ({ serverId, targetUserId, roleId }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      const server = servers.find((s) => s.id === serverId);
+      if (!server) return callback && callback({ success: false, error: 'Servidor não encontrado' });
+
+      // Permission check: Owner or role with administrator / manageRoles permission
+      const isOwner = server.ownerId === activeUser.id;
+      const callerRoleId = server.memberRoles?.[activeUser.id] || (isOwner ? 'role-admin' : 'role-member');
+      const callerRoleObj = (server.roles || []).find(r => r.id === callerRoleId);
+      const hasPermission = isOwner || callerRoleObj?.permissions?.administrator || callerRoleObj?.permissions?.manageRoles;
+
+      if (!hasPermission) {
+        return callback && callback({ success: false, error: 'Apenas o Dono ou Administradores com permissão podem alterar cargos.' });
+      }
+
+      if (!server.memberRoles) server.memberRoles = {};
+      server.memberRoles[targetUserId] = roleId || 'role-member';
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      const formattedServer = formatServerWithMembers(server);
+      io.emit('server-roles-updated', { serverId, roles: server.roles, server: formattedServer });
+      io.emit('server-member-role-updated', { serverId, targetUserId, roleId, server: formattedServer });
+
+      if (callback) callback({ success: true, server: formattedServer });
     });
 
     // ==========================================
@@ -953,6 +1259,67 @@ export async function setupSignaling(io) {
       }
 
       if (callback) callback({ success: true, dm: dmPayload });
+    });
+
+    // ==========================================
+    // DM CALLS SIGNALING
+    // ==========================================
+
+    // Initiate DM Call
+    socket.on('initiate-dm-call', ({ targetUserId, dmId }) => {
+      console.log(`[DM Call] Recebido initiate-dm-call de socket ${socket.id} para alvo ${targetUserId} na DM ${dmId}`);
+      const user = activeSockets.get(socket.id);
+      if (!user) {
+        console.log(`[DM Call] ERRO: Usuário não encontrado no activeSockets para o socket ${socket.id}`);
+        return;
+      }
+      
+      let foundTarget = false;
+      // Find target user's active sockets and notify them
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === targetUserId) {
+          console.log(`[DM Call] Alvo encontrado online no socket ${sockId}! Emitindo dm-call-incoming.`);
+          io.to(sockId).emit('dm-call-incoming', {
+            dmId,
+            caller: sanitizeUser(user),
+          });
+          foundTarget = true;
+        }
+      }
+      
+      if (!foundTarget) {
+        console.log(`[DM Call] AVISO: Alvo ${targetUserId} não possui nenhum socket ativo no momento.`);
+      }
+    });
+
+    // Cancel DM Call (caller hangs up before answer)
+    socket.on('cancel-dm-call', ({ targetUserId, dmId }) => {
+      console.log(`[DM Call] Cancelando chamada na DM ${dmId} para alvo ${targetUserId}`);
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === targetUserId) {
+          io.to(sockId).emit('dm-call-cancelled', { dmId });
+        }
+      }
+    });
+
+    // Decline DM Call (callee rejects)
+    socket.on('decline-dm-call', ({ callerId, dmId }) => {
+      console.log(`[DM Call] Recusando chamada na DM ${dmId} do chamador ${callerId}`);
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === callerId) {
+          io.to(sockId).emit('dm-call-declined', { dmId });
+        }
+      }
+    });
+
+    // Accept DM Call (callee accepts)
+    socket.on('accept-dm-call', ({ callerId, dmId }) => {
+      console.log(`[DM Call] Aceitando chamada na DM ${dmId} do chamador ${callerId}`);
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === callerId) {
+          io.to(sockId).emit('dm-call-accepted', { dmId });
+        }
+      }
     });
 
     // Pin Message (Permanent, survives 1h auto-deletion)
@@ -1136,71 +1503,80 @@ export async function setupSignaling(io) {
           leaveCurrentVoice(socket, user, io, voiceRooms);
         });
 
-        // Move a user to another voice channel (Permissions: Server Owner, Admin, Mod, or Move Members role)
+        // Move a user to another voice channel (Permissions: Server Owner, Admin, or Move/Manage Members role)
         socket.on('move-voice-user', ({ targetUserId, targetChannelId, serverId }, callback) => {
           const caller = activeSockets.get(socket.id);
           if (!caller) return callback && callback({ success: false, error: 'Não autenticado' });
 
-          // Permission check: Owner, Admin, Mod, or self
+          // Permission check: Owner or role with permission (administrator, manageChannels, kickMembers) or self
           const server = servers.find((s) => s.id === serverId);
           const isOwner = server && server.ownerId === caller.id;
-          const isAdminOrMod = caller.roleId === 'role-admin' || caller.roleId === 'role-mod' || caller.id === 'usr-admin';
+          const callerRoleId = server?.memberRoles?.[caller.id] || (isOwner ? 'role-admin' : 'role-member');
+          const callerRoleObj = (server?.roles || []).find(r => r.id === callerRoleId);
+          const canMove = isOwner || Boolean(callerRoleObj?.permissions?.administrator || callerRoleObj?.permissions?.manageChannels || callerRoleObj?.permissions?.kickMembers) || caller.id === targetUserId;
 
-          if (!isOwner && !isAdminOrMod && caller.id !== targetUserId) {
+          if (!canMove) {
             return callback && callback({ success: false, error: 'Sem permissão para mover membros de canal.' });
           }
 
           // Find target user
-          let targetSocket = null;
+          let targetSockId = null;
           let targetUser = null;
           for (const [sockId, u] of activeSockets.entries()) {
             if (u.id === targetUserId || u.socketId === targetUserId) {
-              targetSocket = io.sockets.sockets.get(sockId);
+              targetSockId = sockId;
               targetUser = u;
               break;
             }
           }
 
-          if (!targetUser) {
-            return callback && callback({ success: false, error: 'Usuário não encontrado' });
+          if (!targetUser || !targetSockId) {
+            return callback && callback({ success: false, error: 'Usuário não encontrado ou offline' });
           }
 
-          // Leave old voice room if in one
-          const oldChannelId = targetUser.activeVoiceChannel;
-          if (oldChannelId) {
-            const oldRoom = voiceRooms.get(oldChannelId) || [];
-            voiceRooms.set(oldChannelId, oldRoom.filter((u) => u.id !== targetUser.id && u.socketId !== targetUser.socketId));
-            if (targetSocket) {
-              targetSocket.leave(`voice-${oldChannelId}`);
-              targetSocket.to(`voice-${oldChannelId}`).emit('user-left-voice', {
-                socketId: targetSocket.id,
+          // Clean old room from voiceRooms
+          for (const [rId, rUsers] of voiceRooms.entries()) {
+            const hasTarget = rUsers.some((u) => u.id === targetUser.id || u.socketId === targetSockId);
+            if (hasTarget) {
+              const filtered = rUsers.filter((u) => u.id !== targetUser.id && u.socketId !== targetSockId);
+              if (filtered.length === 0) {
+                voiceRooms.delete(rId);
+              } else {
+                voiceRooms.set(rId, filtered);
+              }
+              const tSock = io.sockets.sockets.get(targetSockId);
+              if (tSock) {
+                tSock.leave(`voice-${rId}`);
+              }
+              io.to(`voice-${rId}`).emit('user-left-voice', {
+                socketId: targetSockId,
                 userId: targetUser.id,
-                channelId: oldChannelId
+                channelId: rId
               });
             }
           }
 
-          // Join new voice room
+          // Add to new room in voiceRooms
           targetUser.activeVoiceChannel = targetChannelId;
           if (!voiceRooms.has(targetChannelId)) {
             voiceRooms.set(targetChannelId, []);
           }
-          const newRoom = voiceRooms.get(targetChannelId).filter((u) => u.id !== targetUser.id && u.socketId !== targetUser.socketId);
+          const newRoom = voiceRooms.get(targetChannelId).filter((u) => u.id !== targetUser.id && u.socketId !== targetSockId);
           newRoom.push(targetUser);
           voiceRooms.set(targetChannelId, newRoom);
 
-          if (targetSocket) {
-            targetSocket.join(`voice-${targetChannelId}`);
-            targetSocket.emit('moved-to-voice-channel', { channelId: targetChannelId, serverId });
-            targetSocket.to(`voice-${targetChannelId}`).emit('user-joined-voice', {
-              user: targetUser,
-              channelId: targetChannelId
-            });
+          const targetSock = io.sockets.sockets.get(targetSockId);
+          if (targetSock) {
+            targetSock.join(`voice-${targetChannelId}`);
           }
 
+          // Broadcast new room state immediately to everyone
           io.emit('voice-rooms-updated', {
             voiceRooms: Object.fromEntries(voiceRooms)
           });
+
+          // Command target client to switch voice streams
+          io.to(targetSockId).emit('moved-to-voice-channel', { channelId: targetChannelId, serverId });
 
           if (callback) callback({ success: true });
         });
@@ -1211,14 +1587,16 @@ export async function setupSignaling(io) {
           if (!caller) return;
           const server = servers.find((s) => s.id === serverId);
           const isOwner = server && server.ownerId === caller.id;
-          const isAdminOrMod = caller.roleId === 'role-admin' || caller.roleId === 'role-mod' || caller.id === 'usr-admin';
+          const callerRoleId = server?.memberRoles?.[caller.id] || (isOwner ? 'role-admin' : 'role-member');
+          const callerRoleObj = (server?.roles || []).find(r => r.id === callerRoleId);
+          const canDisconnect = isOwner || Boolean(callerRoleObj?.permissions?.administrator || callerRoleObj?.permissions?.kickMembers);
 
-          if (!isOwner && !isAdminOrMod) {
+          if (!canDisconnect) {
             return callback && callback({ success: false, error: 'Sem permissão.' });
           }
 
           for (const [sockId, u] of activeSockets.entries()) {
-            if (u.id === targetUserId) {
+            if (u.id === targetUserId || u.socketId === targetUserId) {
               const targetSocket = io.sockets.sockets.get(sockId);
               if (targetSocket) {
                 leaveCurrentVoice(targetSocket, u, io, voiceRooms);
