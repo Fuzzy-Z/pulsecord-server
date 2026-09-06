@@ -258,28 +258,23 @@ class MusicBotManager {
     const searchTitle = cleanMusicTitle(query.trim());
     const results = [];
 
-    // 1. Try SoundCloud multi-search
+    // 1. Fast SoundCloud search (No blocking stream resolution during search!)
     try {
       await ensureSoundCloud();
-      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 8 });
+      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 10 });
       if (scResults && scResults.length > 0) {
         for (let i = 0; i < scResults.length; i++) {
           const track = scResults[i];
-          try {
-            const stream = await play_dl.stream(track.url);
-            if (stream && stream.url) {
-              results.push({
-                id: 'sc-' + Date.now() + '-' + i,
-                title: track.name || searchTitle,
-                artist: track.user?.name || 'SoundCloud Artist',
-                url: stream.url,
-                originalUrl: track.url,
-                cover: track.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
-                duration: track.durationInSec || 0,
-                source: 'soundcloud'
-              });
-            }
-          } catch (e) {}
+          results.push({
+            id: 'sc-' + (track.id || Date.now() + '-' + i),
+            title: track.name || searchTitle,
+            artist: track.user?.name || 'SoundCloud Artist',
+            url: track.url,
+            originalUrl: track.url,
+            cover: track.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+            duration: track.durationInSec || 0,
+            source: 'soundcloud'
+          });
         }
         if (results.length > 0) return results;
       }
@@ -287,13 +282,39 @@ class MusicBotManager {
       console.warn('[MusicBot] SoundCloud search error:', err.message);
     }
 
-    // 2. Try Audius search (Full songs)
+    // 2. Fallback: Search iTunes (High quality metadata & instant response)
+    try {
+      const iTunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTitle)}&media=music&limit=8`;
+      const res = await fetch(iTunesUrl);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.results && data.results.length > 0) {
+          data.results.forEach((track, i) => {
+            results.push({
+              id: 'itunes-' + track.trackId + '-' + i,
+              title: track.trackName || searchTitle,
+              artist: track.artistName || 'Artista',
+              url: track.previewUrl || `${track.artistName} - ${track.trackName}`,
+              originalUrl: track.trackViewUrl,
+              cover: track.artworkUrl100?.replace('100x100bb', '600x600bb') || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+              duration: 30,
+              source: 'itunes'
+            });
+          });
+          if (results.length > 0) return results;
+        }
+      }
+    } catch (err) {
+      console.warn('[MusicBot] iTunes search error:', err.message);
+    }
+
+    // 3. Fallback: Search Audius
     try {
       const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(searchTitle)}&app_name=pulsecord`);
       if (audiusRes.ok) {
         const audiusData = await audiusRes.json();
         if (audiusData.data && audiusData.data.length > 0) {
-          audiusData.data.slice(0, 5).forEach((track, i) => {
+          audiusData.data.slice(0, 8).forEach((track, i) => {
             results.push({
               id: 'audius-' + track.id + '-' + i,
               title: track.title || searchTitle,
@@ -312,30 +333,6 @@ class MusicBotManager {
       console.warn('[MusicBot] Audius search error:', err.message);
     }
 
-    // 3. Fallback: Search iTunes (Full resolution metadata)
-    try {
-      const iTunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTitle)}&media=music&limit=5`;
-      const res = await fetch(iTunesUrl);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.results && data.results.length > 0) {
-          data.results.forEach((track, i) => {
-            results.push({
-              id: 'search-' + Date.now() + '-' + i,
-              title: track.trackName || searchTitle,
-              artist: track.artistName || 'Artista',
-              url: track.previewUrl,
-              originalUrl: track.trackViewUrl,
-              cover: track.artworkUrl100?.replace('100x100bb', '600x600bb') || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
-              duration: 30,
-              source: 'itunes'
-            });
-          });
-        }
-      }
-    } catch (err) {
-      console.warn('[MusicBot] Search resolution error:', err.message);
-    }
     return results;
   }
 
