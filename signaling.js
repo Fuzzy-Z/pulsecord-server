@@ -1402,7 +1402,18 @@ export async function setupSignaling(io) {
       }
 
       storage.saveData(registeredUsers, servers, messageHistory);
-      io.emit('new-message', message);
+
+      if (channelId.startsWith('dm-')) {
+        // DM: Emit ONLY to the 2 participants of this DM
+        const parts = channelId.replace('dm-', '').split('_');
+        for (const [sockId, actUser] of activeSockets.entries()) {
+          if (parts.includes(actUser.id)) {
+            io.to(sockId).emit('new-message', message);
+          }
+        }
+      } else {
+        io.emit('new-message', message);
+      }
 
       if (content && content.startsWith('/')) {
         handleBotCommand(channelId, content, user, io, musicBot, messageHistory, storage, servers, registeredUsers);
@@ -1419,7 +1430,17 @@ export async function setupSignaling(io) {
         const user = activeSockets.get(socket.id);
         msg.pinnedBy = user ? (user.displayName || user.username) : 'Usuário';
         storage.saveData(registeredUsers, servers, messageHistory);
-        io.emit('message-pinned', { channelId, messageId, message: msg });
+
+        if (channelId.startsWith('dm-')) {
+          const parts = channelId.replace('dm-', '').split('_');
+          for (const [sockId, actUser] of activeSockets.entries()) {
+            if (parts.includes(actUser.id)) {
+              io.to(sockId).emit('message-pinned', { channelId, messageId, message: msg });
+            }
+          }
+        } else {
+          io.emit('message-pinned', { channelId, messageId, message: msg });
+        }
       }
     });
 
@@ -1432,7 +1453,17 @@ export async function setupSignaling(io) {
         delete msg.pinnedAt;
         delete msg.pinnedBy;
         storage.saveData(registeredUsers, servers, messageHistory);
-        io.emit('message-unpinned', { channelId, messageId });
+
+        if (channelId.startsWith('dm-')) {
+          const parts = channelId.replace('dm-', '').split('_');
+          for (const [sockId, actUser] of activeSockets.entries()) {
+            if (parts.includes(actUser.id)) {
+              io.to(sockId).emit('message-unpinned', { channelId, messageId });
+            }
+          }
+        } else {
+          io.emit('message-unpinned', { channelId, messageId });
+        }
       }
     });
 
