@@ -692,7 +692,7 @@ export async function setupSignaling(io) {
       const activeUser = activeSockets.get(socket.id);
       if (!activeUser) return callback && callback({ success: false, error: 'Not authenticated' });
 
-      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'username', 'appTheme', 'compactMode', 'clipSettings', 'status'];
+      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'gameStartedAt', 'activity', 'username', 'appTheme', 'compactMode', 'clipSettings', 'status'];
 
       const userIndex = registeredUsers.findIndex(u => u.id === activeUser.id);
 
