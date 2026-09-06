@@ -69,6 +69,17 @@ async function ensureSoundCloud() {
   }
 }
 
+export function cleanMusicTitle(rawTitle) {
+  if (!rawTitle) return '';
+  return rawTitle
+    .replace(/\[\s*(official\s*(music\s*)?video|video\s*oficial|clipe\s*oficial|music\s*video|official\s*audio|audio\s*oficial|lyric\s*video|video\s*com\s*letra|visualizer|audio|hd|hq|4k|1080p)\s*\]/gi, '')
+    .replace(/\(\s*(official\s*(music\s*)?video|video\s*oficial|clipe\s*oficial|music\s*video|official\s*audio|audio\s*oficial|lyric\s*video|video\s*com\s*letra|visualizer|audio|hd|hq|4k|1080p)\s*\)/gi, '')
+    .replace(/\|\s*.*$/g, '')
+    .replace(/["']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 class MusicBotManager {
   constructor(io) {
     this.io = io;
@@ -128,7 +139,7 @@ class MusicBotManager {
         const res = await fetch(oembedUrl);
         if (res.ok) {
           const data = await res.json();
-          searchTitle = data.title || q;
+          searchTitle = cleanMusicTitle(data.title) || data.title || q;
           fallbackCover = data.thumbnail_url || '';
           fallbackArtist = 'Spotify';
         }
@@ -137,7 +148,7 @@ class MusicBotManager {
       }
     }
 
-    // 3. YouTube Link: Extract title via YouTube oEmbed
+    // 3. YouTube Link: Extract title via YouTube oEmbed & sanitize
     if (q.includes('youtube.com/') || q.includes('youtu.be/')) {
       isYouTube = true;
       try {
@@ -145,7 +156,7 @@ class MusicBotManager {
         const res = await fetch(oembedUrl);
         if (res.ok) {
           const data = await res.json();
-          searchTitle = data.title || q;
+          searchTitle = cleanMusicTitle(data.title) || data.title || q;
           fallbackArtist = data.author_name || 'YouTube';
           fallbackCover = data.thumbnail_url || '';
         }
@@ -157,19 +168,34 @@ class MusicBotManager {
     // 4. Try streaming via SoundCloud / Play-DL (Plays the exact full audio stream)
     try {
       await ensureSoundCloud();
-      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 1 });
+      const cleanedQuery = cleanMusicTitle(searchTitle);
+      const scResults = await play_dl.search(cleanedQuery, { source: { soundcloud: 'tracks' }, limit: 5 });
       if (scResults && scResults.length > 0) {
-        const track = scResults[0];
-        const stream = await play_dl.stream(track.url);
+        // Smart matching: prefer track with matching words from artist or track title
+        const lowerQ = cleanedQuery.toLowerCase();
+        const queryWords = lowerQ.split(/[\s-]+/).filter((w) => w.length > 2);
+        let bestTrack = scResults[0];
+
+        for (const t of scResults) {
+          const tName = (t.name || '').toLowerCase();
+          const tUser = (t.user?.name || '').toLowerCase();
+          const matchCount = queryWords.filter((w) => tName.includes(w) || tUser.includes(w)).length;
+          if (matchCount >= 2 || (queryWords.length <= 1 && matchCount >= 1)) {
+            bestTrack = t;
+            break;
+          }
+        }
+
+        const stream = await play_dl.stream(bestTrack.url);
         if (stream && stream.url) {
           return {
             id: 'sc-' + Date.now(),
-            title: track.name || searchTitle,
-            artist: track.user?.name || fallbackArtist || 'SoundCloud Artist',
+            title: bestTrack.name || searchTitle,
+            artist: bestTrack.user?.name || fallbackArtist || 'SoundCloud Artist',
             url: stream.url,
-            originalUrl: track.url || q,
-            cover: track.thumbnail || fallbackCover || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
-            duration: track.durationInSec || 0,
+            originalUrl: bestTrack.url || q,
+            cover: bestTrack.thumbnail || fallbackCover || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+            duration: bestTrack.durationInSec || 0,
             source: isSpotify ? 'spotify' : isYouTube ? 'youtube' : 'soundcloud'
           };
         }
@@ -180,7 +206,8 @@ class MusicBotManager {
 
     // 5. Full Streaming Fallback: Search Audius (Full length tracks)
     try {
-      const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(searchTitle)}&app_name=pulsecord`);
+      const cleanedQuery = cleanMusicTitle(searchTitle);
+      const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(cleanedQuery)}&app_name=pulsecord`);
       if (audiusRes.ok) {
         const audiusData = await audiusRes.json();
         if (audiusData.data && audiusData.data.length > 0) {
@@ -228,13 +255,13 @@ class MusicBotManager {
 
   async searchTracks(query) {
     if (!query || !query.trim()) return [];
-    const searchTitle = query.trim();
+    const searchTitle = cleanMusicTitle(query.trim());
     const results = [];
 
     // 1. Try SoundCloud multi-search
     try {
       await ensureSoundCloud();
-      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 5 });
+      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 8 });
       if (scResults && scResults.length > 0) {
         for (let i = 0; i < scResults.length; i++) {
           const track = scResults[i];
