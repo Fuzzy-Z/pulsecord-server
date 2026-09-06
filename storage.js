@@ -1,3 +1,12 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DATA_DIR = path.join(__dirname, 'data');
+const DB_FILE = path.join(DATA_DIR, 'database.json');
+
 export class StorageManager {
   constructor() {
     this.redisClient = null;
@@ -6,6 +15,15 @@ export class StorageManager {
   }
 
   async initStorage() {
+    // Ensure local data directory exists for disk persistence
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+    } catch (err) {
+      console.error('[Storage] Error ensuring data directory exists:', err.message);
+    }
+
     // 1. Check Upstash REST credentials (UPSTASH_REDIS_REST_URL & UPSTASH_REDIS_REST_TOKEN)
     const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
     const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -45,7 +63,7 @@ export class StorageManager {
     }
 
     if (!this.useRedis) {
-      console.warn('[Storage] No active Redis credentials found. Running in-memory mode without local fallback.');
+      console.log(`[Storage] Running with local disk persistence enabled at: ${DB_FILE}`);
     }
   }
 
@@ -54,6 +72,7 @@ export class StorageManager {
     let servers = defaultServers;
     let messageHistory = defaultHistory;
 
+    // First try Redis if configured
     if (this.upstashClient) {
       try {
         const rawUsers = await this.upstashClient.get('pulsecord:users');
@@ -95,6 +114,26 @@ export class StorageManager {
       }
     }
 
+    // Disk persistence fallback (ideal for standalone VM without Redis, keeps pinned photos/videos)
+    if (fs.existsSync(DB_FILE)) {
+      try {
+        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+        const diskDb = JSON.parse(raw);
+        if (diskDb.users && Array.isArray(diskDb.users)) {
+          users = diskDb.users;
+        }
+        if (diskDb.servers && Array.isArray(diskDb.servers) && diskDb.servers.length > 0) {
+          servers = diskDb.servers;
+        }
+        if (diskDb.messageHistory && typeof diskDb.messageHistory === 'object') {
+          messageHistory = new Map(Object.entries(diskDb.messageHistory));
+        }
+        console.log(`[Storage] Loaded data from local disk database (${users.length} users, ${servers.length} servers, ${messageHistory.size} channels)`);
+      } catch (err) {
+        console.error('[Storage] Error reading local disk database.json:', err.message);
+      }
+    }
+
     return {
       users,
       servers,
@@ -105,12 +144,28 @@ export class StorageManager {
   async saveData(users, servers, messageHistoryMap) {
     const historyObj = Object.fromEntries(messageHistoryMap);
 
+    // 1. Always save to local disk database file (persists pinned messages, photos, videos reliably)
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      const dataPayload = JSON.stringify({
+        users,
+        servers,
+        messageHistory: historyObj,
+        updatedAt: new Date().toISOString()
+      });
+      fs.writeFileSync(DB_FILE, dataPayload, 'utf-8');
+    } catch (err) {
+      console.error('[Storage] Failed to persist data to local disk:', err.message);
+    }
+
+    // 2. Also replicate to Redis if available
     if (this.upstashClient) {
       try {
         await this.upstashClient.set('pulsecord:users', users);
         await this.upstashClient.set('pulsecord:servers', servers);
         await this.upstashClient.set('pulsecord:history', historyObj);
-        return;
       } catch (err) {
         console.error('[Storage] Failed saving to Upstash Redis:', err.message);
       }
@@ -121,7 +176,6 @@ export class StorageManager {
         await this.redisClient.set('pulsecord:users', JSON.stringify(users));
         await this.redisClient.set('pulsecord:servers', JSON.stringify(servers));
         await this.redisClient.set('pulsecord:history', JSON.stringify(historyObj));
-        return;
       } catch (err) {
         console.error('[Storage] Failed saving to Redis:', err.message);
       }
