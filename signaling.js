@@ -142,6 +142,16 @@ export async function setupSignaling(io) {
   let servers = loadedData.servers || INITIAL_SERVERS;
   let messageHistory = loadedData.messageHistory || initialHistory;
 
+  // Force kaykygithub24@gmail.com to be the owner of PulseCord Community
+  const adminUser = registeredUsers.find(u => u.email === 'kaykygithub24@gmail.com');
+  if (adminUser) {
+    const defaultServer = servers.find(s => s.id === 'server-1');
+    if (defaultServer) {
+      defaultServer.ownerId = adminUser.id;
+      if (!defaultServer.memberRoles) defaultServer.memberRoles = {};
+      defaultServer.memberRoles[adminUser.id] = 'role-admin';
+    }
+  }
   // Active online connections: socketId -> User profile
   const activeSockets = new Map();
   // Map of channelId -> Array of userIds currently in voice
@@ -221,7 +231,7 @@ export async function setupSignaling(io) {
         const sanitized = sanitizeUser(u);
         if (!sanitized) return null;
         const isOwner = u.id === s.ownerId;
-        const roleId = s.memberRoles[u.id] || (isOwner ? 'role-admin' : 'role-member');
+        const roleId = (u.email === 'kaykygithub24@gmail.com' && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[u.id] || (isOwner ? 'role-admin' : 'role-member'));
         return {
           ...sanitized,
           roleId
@@ -235,7 +245,7 @@ export async function setupSignaling(io) {
           const sanitized = sanitizeUser(u);
           if (!sanitized) return null;
           const isOwner = id === s.ownerId;
-          const roleId = s.memberRoles[id] || (isOwner ? 'role-admin' : 'role-member');
+          const roleId = (u && u.email === 'kaykygithub24@gmail.com' && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[id] || (isOwner ? 'role-admin' : 'role-member'));
           return {
             ...sanitized,
             roleId
@@ -1494,6 +1504,7 @@ export async function setupSignaling(io) {
       }
 
       user.activeVoiceChannel = channelId;
+      user.isScreenSharing = false;
       socket.join(`voice-${channelId}`);
 
       if (!voiceRooms.has(channelId)) {
