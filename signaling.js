@@ -329,8 +329,18 @@ export async function setupSignaling(io) {
   // Run cleanup every 30 seconds
   setInterval(pruneOldMessages, 30 * 1000);
 
+  // Self-healing: Periodic voice rooms integrity check & ghost cleanup (every 5 seconds)
+  setInterval(() => {
+    const changed = cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'heartbeat');
+    if (changed) {
+      io.emit('voice-rooms-updated', { voiceRooms: Object.fromEntries(voiceRooms) });
+    }
+  }, 5000);
+
   io.on('connection', (socket) => {
     console.log(`[Socket Connected] ID: ${socket.id}`);
+
+    cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'connection');
 
     // Immediately send current voice rooms to newly connected client
     socket.emit('voice-rooms-updated', {
@@ -339,6 +349,7 @@ export async function setupSignaling(io) {
 
     // Allow client to explicitly request voice rooms sync at any time
     socket.on('sync-voice-rooms', (callback) => {
+      cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'sync-voice-rooms');
       const data = Object.fromEntries(voiceRooms);
       socket.emit('voice-rooms-updated', { voiceRooms: data });
       if (callback) callback({ success: true, voiceRooms: data });
@@ -638,6 +649,18 @@ export async function setupSignaling(io) {
       // Issue signed JWT token
       user.token = signUserToken(user);
 
+      // Clean up any stale sockets for this user ID
+      for (const [oldSockId, oldUser] of activeSockets.entries()) {
+        if (oldUser.id === user.id && oldSockId !== socket.id) {
+          const oldSock = io.sockets.sockets.get(oldSockId);
+          if (!oldSock || !oldSock.connected) {
+            activeSockets.delete(oldSockId);
+          }
+        }
+      }
+
+      cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-login');
+
       const activeUser = {
         ...user,
         socketId: socket.id,
@@ -692,6 +715,18 @@ export async function setupSignaling(io) {
       // Refresh JWT token
       user.token = signUserToken(user);
 
+      // Clean up any stale sockets for this user ID
+      for (const [oldSockId, oldUser] of activeSockets.entries()) {
+        if (oldUser.id === user.id && oldSockId !== socket.id) {
+          const oldSock = io.sockets.sockets.get(oldSockId);
+          if (!oldSock || !oldSock.connected) {
+            activeSockets.delete(oldSockId);
+          }
+        }
+      }
+
+      cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-session');
+
       const activeUser = {
         ...user,
         socketId: socket.id,
@@ -724,7 +759,7 @@ export async function setupSignaling(io) {
     socket.on('auth-logout', (callback) => {
       const activeUser = activeSockets.get(socket.id);
       if (activeUser) {
-        leaveCurrentVoice(socket, activeUser, io, voiceRooms);
+        leaveCurrentVoice(socket, activeUser, io, voiceRooms, activeSockets);
         activeSockets.delete(socket.id);
         io.emit('user-status-changed', { user: { ...activeUser, status: 'offline' } });
       }
@@ -1590,13 +1625,26 @@ export async function setupSignaling(io) {
       }
 
       const roomUsers = voiceRooms.get(channelId);
-      const existingIdx = roomUsers.findIndex((u) => u.id === user.id || u.socketId === socket.id);
-      if (existingIdx !== -1) roomUsers.splice(existingIdx, 1);
+      const cleanUsers = roomUsers.filter((u) => u.id !== user.id && u.socketId !== socket.id);
+      cleanUsers.push({
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName || user.username,
+        avatar: user.avatar,
+        avatarUrl: user.avatarUrl,
+        avatarColor: user.avatarColor,
+        isMuted: Boolean(user.isMuted),
+        isDeafened: Boolean(user.isDeafened),
+        isScreenSharing: Boolean(user.isScreenSharing),
+        socketId: socket.id,
+        roleId: user.roleId
+      });
+      voiceRooms.set(channelId, cleanUsers);
 
-      roomUsers.push(user);
+      cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'join-voice');
 
       socket.to(`voice-${channelId}`).emit('user-joined-voice', {
-        user,
+        user: { ...user, socketId: socket.id },
         channelId
       });
 
@@ -1607,7 +1655,7 @@ export async function setupSignaling(io) {
       if (callback) {
         callback({
           success: true,
-          usersInRoom: roomUsers.filter((u) => u.socketId !== socket.id && u.id !== user.id),
+          usersInRoom: (voiceRooms.get(channelId) || []).filter((u) => u.socketId !== socket.id && u.id !== user.id),
           musicPlayer,
           watchTogether
         });
@@ -1620,7 +1668,7 @@ export async function setupSignaling(io) {
 
     socket.on('leave-voice', () => {
       const user = activeSockets.get(socket.id);
-      leaveCurrentVoice(socket, user, io, voiceRooms);
+      leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets);
     });
 
     // Move a user to another voice channel (Permissions: Server Owner, Admin, or Move/Manage Members role)
@@ -1719,7 +1767,7 @@ export async function setupSignaling(io) {
         if (u.id === targetUserId || u.socketId === targetUserId) {
           const targetSocket = io.sockets.sockets.get(sockId);
           if (targetSocket) {
-            leaveCurrentVoice(targetSocket, u, io, voiceRooms);
+            leaveCurrentVoice(targetSocket, u, io, voiceRooms, activeSockets);
             targetSocket.emit('force-disconnected-from-voice');
           }
           break;
@@ -1926,25 +1974,111 @@ export async function setupSignaling(io) {
     socket.on('disconnect', () => {
       console.log(`[Socket Disconnected] ID: ${socket.id}`);
       const user = activeSockets.get(socket.id);
+
+      // Clean this socket from any voice rooms immediately
+      leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets);
+
+      activeSockets.delete(socket.id);
+
       if (user) {
-        if (user.activeVoiceChannel) {
-          leaveCurrentVoice(socket, user, io, voiceRooms);
+        const hasOtherSockets = hasOtherConnectedSocketForUser(user.id, socket.id, activeSockets, io);
+        if (!hasOtherSockets) {
+          io.emit('user-status-changed', { user: { ...user, status: 'offline' } });
         }
-        activeSockets.delete(socket.id);
-        io.emit('user-status-changed', { user: { ...user, status: 'offline' } });
       }
     });
   });
 }
 
-function leaveCurrentVoice(socket, user, io, voiceRooms) {
+function hasOtherConnectedSocketForUser(userId, currentSocketId, activeSockets, io) {
+  if (!userId || !activeSockets) return false;
+  for (const [sockId, actUser] of activeSockets.entries()) {
+    if (actUser && actUser.id === userId && sockId !== currentSocketId) {
+      const sock = io?.sockets?.sockets?.get(sockId);
+      if (sock && sock.connected) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, reason = '') {
+  if (!voiceRooms || !io) return false;
+  let changed = false;
+  const seenUserIds = new Map(); // userId -> { channelId, socketId }
+
+  for (const [channelId, room] of Array.from(voiceRooms.entries())) {
+    if (!Array.isArray(room) || room.length === 0) {
+      voiceRooms.delete(channelId);
+      changed = true;
+      continue;
+    }
+
+    const cleanRoom = [];
+    for (const u of room) {
+      if (!u || !u.id || !u.socketId) {
+        changed = true;
+        continue;
+      }
+
+      // Check socket liveness: socket must exist in io.sockets.sockets AND be connected
+      const sock = io.sockets.sockets.get(u.socketId);
+      if (!sock || !sock.connected) {
+        changed = true;
+        continue;
+      }
+
+      // Single-room invariant: A user ID can exist in at most ONE voice channel
+      if (seenUserIds.has(u.id)) {
+        changed = true;
+        continue;
+      }
+
+      seenUserIds.set(u.id, { channelId, socketId: u.socketId });
+      cleanRoom.push(u);
+    }
+
+    if (cleanRoom.length === 0) {
+      voiceRooms.delete(channelId);
+      changed = true;
+    } else if (cleanRoom.length !== room.length) {
+      voiceRooms.set(channelId, cleanRoom);
+      changed = true;
+    }
+  }
+
+  if (activeSockets) {
+    for (const [sockId, actUser] of activeSockets.entries()) {
+      const voiceInfo = seenUserIds.get(actUser.id);
+      if (voiceInfo && voiceInfo.socketId === sockId) {
+        if (actUser.activeVoiceChannel !== voiceInfo.channelId) {
+          actUser.activeVoiceChannel = voiceInfo.channelId;
+          changed = true;
+        }
+      } else if (actUser.activeVoiceChannel) {
+        actUser.activeVoiceChannel = null;
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
+}
+
+function leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets) {
   const socketId = socket?.id;
   const userId = user?.id;
 
   for (const [channelId, room] of voiceRooms.entries()) {
-    const hasMatch = room.some((u) => (socketId && u.socketId === socketId) || (userId && u.id === userId));
+    const hasOtherSock = hasOtherConnectedSocketForUser(userId, socketId, activeSockets, io);
+    const hasMatch = room.some((u) => (socketId && u.socketId === socketId) || (userId && u.id === userId && !hasOtherSock));
     if (hasMatch) {
-      const updated = room.filter((u) => (!socketId || u.socketId !== socketId) && (!userId || u.id !== userId));
+      const updated = room.filter((u) => {
+        if (socketId && u.socketId === socketId) return false;
+        if (userId && u.id === userId && !hasOtherSock) return false;
+        return true;
+      });
       if (updated.length === 0) {
         voiceRooms.delete(channelId);
       } else {
@@ -1962,10 +2096,12 @@ function leaveCurrentVoice(socket, user, io, voiceRooms) {
     }
   }
 
-  if (user) {
+  if (user && !hasOtherConnectedSocketForUser(user.id, socketId, activeSockets, io)) {
     user.activeVoiceChannel = null;
     user.isScreenSharing = false;
   }
+
+  cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'leaveCurrentVoice');
 
   io.emit('voice-rooms-updated', {
     voiceRooms: Object.fromEntries(voiceRooms)
