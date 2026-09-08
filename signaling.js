@@ -600,72 +600,14 @@ export async function setupSignaling(io) {
       io.emit('user-status-changed', { user: activeUser });
     });
 
-    // Quick Guest Entry (Nickname only, 1-click test with signed JWT)
-    socket.on('auth-guest', ({ username, avatarColor }, callback) => {
-      const cleanUsername = (username || `User_${Math.floor(1000 + Math.random() * 9000)}`).trim();
-      const cleanAvatar = cleanUsername.substring(0, 2).toUpperCase();
-
-      const guestUser = {
-        id: `usr-guest-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        email: `${cleanUsername.toLowerCase().replace(/[^a-z0-9]/g, '') || 'guest'}@pulsecord.guest`,
-        password: '',
-        username: cleanUsername,
-        avatar: cleanAvatar,
-        avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
-        token: '',
-        createdAt: new Date().toISOString(),
-        serverIds: ['server-1'],
-        isGuest: true,
-        bio: '',
-        pronouns: '',
-        displayName: cleanUsername,
-        customStatus: { text: '', emoji: '' },
-        gameStatus: '',
-        badges: [],
-        avatarUrl: '',
-        bannerUrl: '',
-        avatarDecoration: '',
-        profileEffect: ''
-      };
-
-      guestUser.token = signUserToken(guestUser);
-      registeredUsers.push(guestUser);
-
-      // Add to default server
-      const defaultServer = servers.find((s) => s.id === 'server-1');
-      if (defaultServer) {
-        if (!defaultServer.memberIds) defaultServer.memberIds = [];
-        if (!defaultServer.memberIds.includes(guestUser.id)) {
-          defaultServer.memberIds.push(guestUser.id);
-        }
-      }
-
-      const activeUser = {
-        ...guestUser,
-        socketId: socket.id,
-        status: 'online',
-        isMuted: false,
-        isDeafened: false,
-        isScreenSharing: false,
-        activeVoiceChannel: null
-      };
-      activeSockets.set(socket.id, activeUser);
-
-      const userServers = getServersForUser(guestUser.id);
-
+    // Quick Guest Entry (Deprecating: quick guest access discontinued)
+    socket.on('auth-guest', (_, callback) => {
       if (callback) {
         callback({
-          success: true,
-          user: {
-            ...guestUser,
-            password: undefined
-          },
-          servers: userServers,
-          voiceRooms: Object.fromEntries(voiceRooms)
+          success: false,
+          error: 'O acesso rápido foi descontinuado. Por favor, crie uma conta ou entre com o Google.'
         });
       }
-
-      io.emit('user-status-changed', { user: activeUser });
     });
 
     // Login with Email & Password (bcrypt check & JWT issuance)
