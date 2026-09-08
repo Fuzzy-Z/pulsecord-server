@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import bcrypt from 'bcryptjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -144,13 +145,26 @@ export class StorageManager {
   async saveData(users, servers, messageHistoryMap) {
     const historyObj = Object.fromEntries(messageHistoryMap);
 
+    // Cryptographically protect stored passwords using bcrypt
+    const safeUsers = (users || []).map((u) => {
+      const copy = { ...u };
+      if (copy.password && typeof copy.password === 'string' && !copy.password.startsWith('$2')) {
+        try {
+          copy.password = bcrypt.hashSync(copy.password, 10);
+        } catch (e) {
+          console.error('[Storage] Error hashing password for user:', copy.id, e.message);
+        }
+      }
+      return copy;
+    });
+
     // 1. Always save to local disk database file (persists pinned messages, photos, videos reliably)
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
       }
       const dataPayload = JSON.stringify({
-        users,
+        users: safeUsers,
         servers,
         messageHistory: historyObj,
         updatedAt: new Date().toISOString()
@@ -163,7 +177,7 @@ export class StorageManager {
     // 2. Also replicate to Redis if available
     if (this.upstashClient) {
       try {
-        await this.upstashClient.set('pulsecord:users', users);
+        await this.upstashClient.set('pulsecord:users', safeUsers);
         await this.upstashClient.set('pulsecord:servers', servers);
         await this.upstashClient.set('pulsecord:history', historyObj);
       } catch (err) {
@@ -173,7 +187,7 @@ export class StorageManager {
 
     if (this.useRedis && this.redisClient) {
       try {
-        await this.redisClient.set('pulsecord:users', JSON.stringify(users));
+        await this.redisClient.set('pulsecord:users', JSON.stringify(safeUsers));
         await this.redisClient.set('pulsecord:servers', JSON.stringify(servers));
         await this.redisClient.set('pulsecord:history', JSON.stringify(historyObj));
       } catch (err) {

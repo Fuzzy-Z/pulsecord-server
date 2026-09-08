@@ -1,6 +1,17 @@
 import { MusicBotManager, PRESET_STREAMS } from './musicService.js';
 import { StorageManager } from './storage.js';
 import { OAuth2Client } from 'google-auth-library';
+import {
+  signUserToken,
+  verifyUserToken,
+  hashPassword,
+  verifyPassword,
+  validateAttachments,
+  canUserAccessChannel,
+  canUserAccessVoice,
+  canUserManageMessage,
+  MAX_CONTENT_LENGTH
+} from './security.js';
 
 const GOOGLE_CLIENT_ID = '405787129624-ttiutf9ifmvoscr1skm302f2du5ahko7.apps.googleusercontent.com';
 const googleOAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -337,36 +348,29 @@ export async function setupSignaling(io) {
     // 1. AUTHENTICATION & LOGIN / REGISTER
     // ==========================================
 
-    // Google OAuth 2.0 Login & Automatic Account Creation
+    // Google OAuth 2.0 Login & Automatic Account Creation (Strict Credential Verification)
     socket.on('auth-google', async (rawInput, callback) => {
       try {
         const data = (rawInput && typeof rawInput.credential === 'object') ? rawInput.credential : (rawInput || {});
         let payload = null;
 
-        if (typeof data.credential === 'string') {
-          try {
-            const ticket = await googleOAuthClient.verifyIdToken({
-              idToken: data.credential,
-              audience: GOOGLE_CLIENT_ID,
-            });
-            payload = ticket.getPayload();
-          } catch (verifyErr) {
-            const parts = data.credential.split('.');
-            if (parts.length === 3) {
-              payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-            }
-          }
-        } else if (data.email) {
-          payload = {
-            email: data.email,
-            name: data.name || data.email.split('@')[0],
-            picture: data.picture || '',
-            sub: data.sub || `g-${Date.now()}`
-          };
+        if (typeof data.credential !== 'string' || !data.credential.trim()) {
+          return callback && callback({ success: false, error: 'Credencial Google ausente ou inválida.' });
         }
 
-        if (!payload || !payload.email) {
-          return callback && callback({ success: false, error: 'Não foi possível obter dados da conta Google.' });
+        try {
+          const ticket = await googleOAuthClient.verifyIdToken({
+            idToken: data.credential.trim(),
+            audience: GOOGLE_CLIENT_ID,
+          });
+          payload = ticket.getPayload();
+        } catch (verifyErr) {
+          console.warn('[Security] Google ID token verification failed:', verifyErr.message);
+          return callback && callback({ success: false, error: 'Falha na verificação de autenticidade da conta Google.' });
+        }
+
+        if (!payload || !payload.email || !payload.sub) {
+          return callback && callback({ success: false, error: 'Token Google inválido ou sem identificador de conta.' });
         }
 
         const normEmail = payload.email.trim().toLowerCase();
@@ -403,7 +407,7 @@ export async function setupSignaling(io) {
             avatar: cleanAvatar,
             avatarUrl: photoUrl,
             avatarColor: chosenColor,
-            token: `tok-g-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
+            token: '',
             createdAt: new Date().toISOString(),
             serverIds: ['server-1'],
             isGoogleAuth: true,
@@ -428,9 +432,7 @@ export async function setupSignaling(io) {
               defaultServer.memberIds.push(user.id);
             }
           }
-
-          storage.saveData(registeredUsers, servers, messageHistory);
-          console.log(`[Google Auth] Created new user: ${user.username} (${user.email})`);
+          console.log(`[Google Auth] Created verified user: ${user.username} (${user.email})`);
         } else {
           // Update username, initials and chosen gradient
           if (data.chosenUsername || data.username) {
@@ -449,9 +451,12 @@ export async function setupSignaling(io) {
           if (!user.googleId) {
             user.googleId = payload.sub;
           }
-          storage.saveData(registeredUsers, servers, messageHistory);
           console.log(`[Google Auth] Logged in existing user: ${user.username} (${user.email})`);
         }
+
+        // Issue cryptographically signed JWT token
+        user.token = signUserToken(user);
+        storage.saveData(registeredUsers, servers, messageHistory);
 
         // Activate session for this socket
         const activeUser = {
@@ -486,28 +491,35 @@ export async function setupSignaling(io) {
       }
     });
 
-    // Register New Account
-    socket.on('auth-register', ({ email, password, username, avatar, avatarColor }, callback) => {
+    // Register New Account (with bcrypt hash & signed JWT)
+    socket.on('auth-register', async ({ email, password, username, avatar, avatarColor }, callback) => {
       const normEmail = (email || '').trim().toLowerCase();
-      if (!normEmail || !password) {
+      const rawPassword = (password || '').trim();
+
+      if (!normEmail || !rawPassword) {
         return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
       }
 
+      if (rawPassword.length < 6) {
+        return callback && callback({ success: false, error: 'A senha deve conter no mínimo 6 caracteres.' });
+      }
+
       if (registeredUsers.some((u) => u.email === normEmail)) {
-        return callback && callback({ success: false, error: 'Este e-mail já está cadastrado no PulseCord.' });
+        return callback && callback({ success: false, error: 'Este e-mail já está cadastrado no Voxel.' });
       }
 
       const cleanUsername = (username || normEmail.split('@')[0]).trim();
       const cleanAvatar = (avatar || cleanUsername).substring(0, 2).toUpperCase();
+      const hashedPassword = await hashPassword(rawPassword);
 
       const newUser = {
         id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         email: normEmail,
-        password: password.trim(),
+        password: hashedPassword,
         username: cleanUsername,
         avatar: cleanAvatar,
         avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
-        token: `tok-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`,
+        token: '',
         createdAt: new Date().toISOString(),
         serverIds: ['server-1'],
         bio: '',
@@ -522,6 +534,8 @@ export async function setupSignaling(io) {
         profileEffect: ''
       };
 
+      // Generate signed JWT token
+      newUser.token = signUserToken(newUser);
       registeredUsers.push(newUser);
 
       // Add to default community server
@@ -564,7 +578,7 @@ export async function setupSignaling(io) {
       io.emit('user-status-changed', { user: activeUser });
     });
 
-    // Quick Guest Entry (Nickname only, 1-click test)
+    // Quick Guest Entry (Nickname only, 1-click test with signed JWT)
     socket.on('auth-guest', ({ username, avatarColor }, callback) => {
       const cleanUsername = (username || `User_${Math.floor(1000 + Math.random() * 9000)}`).trim();
       const cleanAvatar = cleanUsername.substring(0, 2).toUpperCase();
@@ -576,7 +590,7 @@ export async function setupSignaling(io) {
         username: cleanUsername,
         avatar: cleanAvatar,
         avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
-        token: `tok-guest-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+        token: '',
         createdAt: new Date().toISOString(),
         serverIds: ['server-1'],
         isGuest: true,
@@ -591,6 +605,8 @@ export async function setupSignaling(io) {
         avatarDecoration: '',
         profileEffect: ''
       };
+
+      guestUser.token = signUserToken(guestUser);
 
       // Add to default server
       const defaultServer = servers.find((s) => s.id === 'server-1');
@@ -629,16 +645,33 @@ export async function setupSignaling(io) {
       io.emit('user-status-changed', { user: activeUser });
     });
 
-    // Login with Email & Password
-    socket.on('auth-login', ({ email, password }, callback) => {
+    // Login with Email & Password (bcrypt check & JWT issuance)
+    socket.on('auth-login', async ({ email, password }, callback) => {
       const normEmail = (email || '').trim().toLowerCase();
-      const user = registeredUsers.find(
-        (u) => u.email === normEmail && u.password === (password || '').trim()
-      );
+      const rawPassword = (password || '').trim();
 
+      if (!normEmail || !rawPassword) {
+        return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
+      }
+
+      const user = registeredUsers.find((u) => u.email === normEmail);
       if (!user) {
         return callback && callback({ success: false, error: 'E-mail ou senha incorretos.' });
       }
+
+      const { match, needsRehash } = await verifyPassword(rawPassword, user.password);
+      if (!match) {
+        return callback && callback({ success: false, error: 'E-mail ou senha incorretos.' });
+      }
+
+      // Upgrade plain password to bcrypt hash if needed
+      if (needsRehash) {
+        user.password = await hashPassword(rawPassword);
+        storage.saveData(registeredUsers, servers, messageHistory);
+      }
+
+      // Issue signed JWT token
+      user.token = signUserToken(user);
 
       const activeUser = {
         ...user,
@@ -668,12 +701,31 @@ export async function setupSignaling(io) {
       io.emit('user-status-changed', { user: activeUser });
     });
 
-    // Auto-Login / Resume Saved Session (Remember Me)
+    // Auto-Login / Resume Saved Session (STRICT JWT VALIDATION — NEVER ACCEPTS USERID ALONE)
     socket.on('auth-session', ({ token, userId }, callback) => {
-      const user = registeredUsers.find((u) => u.token === token || u.id === userId);
-      if (!user) {
-        return callback && callback({ success: false, error: 'Sessão expirada. Faça login novamente.' });
+      if (!token || typeof token !== 'string') {
+        return callback && callback({ success: false, error: 'Token de sessão ausente. Faça login novamente.' });
       }
+
+      const decoded = verifyUserToken(token);
+      if (!decoded || !decoded.userId) {
+        return callback && callback({ success: false, error: 'Sessão inválida ou expirada. Faça login novamente.' });
+      }
+
+      // Retrieve user strictly by decoded.userId from the cryptographically verified JWT token
+      const user = registeredUsers.find((u) => u.id === decoded.userId);
+      if (!user) {
+        return callback && callback({ success: false, error: 'Usuário da sessão não encontrado. Faça login novamente.' });
+      }
+
+      // If client supplied userId, ensure it matches verified token
+      if (userId && userId !== decoded.userId) {
+        console.warn(`[Security Alert] Session token mismatch: client claims ${userId}, token belongs to ${decoded.userId}`);
+        return callback && callback({ success: false, error: 'Violação de identidade de sessão detectada.' });
+      }
+
+      // Refresh JWT token
+      user.token = signUserToken(user);
 
       const activeUser = {
         ...user,
@@ -701,6 +753,17 @@ export async function setupSignaling(io) {
       }
 
       io.emit('user-status-changed', { user: activeUser });
+    });
+
+    // Explicit Logout (Revoke active session on server)
+    socket.on('auth-logout', (callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (activeUser) {
+        leaveCurrentVoice(socket, activeUser, io, voiceRooms);
+        activeSockets.delete(socket.id);
+        io.emit('user-status-changed', { user: { ...activeUser, status: 'offline' } });
+      }
+      if (callback) callback({ success: true });
     });
 
     // User Profile Update
@@ -946,7 +1009,7 @@ export async function setupSignaling(io) {
       if (callback) callback({ success: true, server: formattedTarget });
     });
 
-    // Get or Create Invite Code for Server
+    // Get or Create Invite Code for Server (Requires Membership)
     socket.on('get-server-invite', ({ serverId }, callback) => {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
@@ -955,6 +1018,14 @@ export async function setupSignaling(io) {
       const targetServer = servers.find((s) => s.id === serverId || (decodedId && s.id === decodedId));
       if (!targetServer) {
         return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+      }
+
+      // Check membership
+      const isMember = targetServer.isCommunity || targetServer.id === 'server-1' ||
+        targetServer.ownerId === user.id ||
+        (Array.isArray(targetServer.memberIds) && targetServer.memberIds.includes(user.id));
+      if (!isMember) {
+        return callback && callback({ success: false, error: 'Acesso negado. Você não é membro deste servidor.' });
       }
 
       if (!targetServer.inviteCode) {
@@ -974,7 +1045,7 @@ export async function setupSignaling(io) {
       });
     });
 
-    // Generate New Invite Code for Server
+    // Generate New Invite Code for Server (Requires Owner / Admin Permissions)
     socket.on('generate-new-invite', ({ serverId }, callback) => {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
@@ -983,6 +1054,16 @@ export async function setupSignaling(io) {
       const targetServer = servers.find((s) => s.id === serverId || (decodedId && s.id === decodedId));
       if (!targetServer) {
         return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+      }
+
+      const canManage = targetServer.ownerId === user.id ||
+        user.isAdmin ||
+        user.roleId === 'role-admin' ||
+        user.roleId === 'role-mod' ||
+        (targetServer.memberRoles && (targetServer.memberRoles[user.id] === 'role-admin' || targetServer.memberRoles[user.id] === 'role-mod'));
+
+      if (!canManage) {
+        return callback && callback({ success: false, error: 'Acesso negado. Apenas moderadores e administradores podem gerar novos códigos de convite.' });
       }
 
       targetServer.inviteCode = encodeServerToInvite(targetServer);
@@ -1191,6 +1272,14 @@ export async function setupSignaling(io) {
     // 3. TEXT CHAT, DIRECT MESSAGES & PINNING
     // ==========================================
     socket.on('fetch-messages', ({ channelId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback([]);
+
+      // Strict channel access authorization (prevents unauthorized reading of private DMs and private server channels)
+      if (!canUserAccessChannel(user, channelId, servers, dmConversations)) {
+        return callback && callback([]);
+      }
+
       const msgs = messageHistory.get(channelId) || [];
       if (callback) callback(msgs);
     });
@@ -1283,34 +1372,28 @@ export async function setupSignaling(io) {
 
     // Initiate DM Call
     socket.on('initiate-dm-call', ({ targetUserId, dmId }) => {
-      console.log(`[DM Call] Recebido initiate-dm-call de socket ${socket.id} para alvo ${targetUserId} na DM ${dmId}`);
       const user = activeSockets.get(socket.id);
-      if (!user) {
-        console.log(`[DM Call] ERRO: Usuário não encontrado no activeSockets para o socket ${socket.id}`);
-        return;
-      }
-      
-      let foundTarget = false;
-      // Find target user's active sockets and notify them
+      if (!user) return;
+
+      // Verify user is in DM
+      if (!canUserAccessChannel(user, dmId, servers, dmConversations)) return;
+
       for (const [sockId, actUser] of activeSockets.entries()) {
         if (actUser.id === targetUserId) {
-          console.log(`[DM Call] Alvo encontrado online no socket ${sockId}! Emitindo dm-call-incoming.`);
           io.to(sockId).emit('dm-call-incoming', {
             dmId,
             caller: sanitizeUser(user),
           });
-          foundTarget = true;
         }
-      }
-      
-      if (!foundTarget) {
-        console.log(`[DM Call] AVISO: Alvo ${targetUserId} não possui nenhum socket ativo no momento.`);
       }
     });
 
     // Cancel DM Call (caller hangs up before answer)
     socket.on('cancel-dm-call', ({ targetUserId, dmId }) => {
-      console.log(`[DM Call] Cancelando chamada na DM ${dmId} para alvo ${targetUserId}`);
+      const user = activeSockets.get(socket.id);
+      if (!user) return;
+      if (!canUserAccessChannel(user, dmId, servers, dmConversations)) return;
+
       for (const [sockId, actUser] of activeSockets.entries()) {
         if (actUser.id === targetUserId) {
           io.to(sockId).emit('dm-call-cancelled', { dmId });
@@ -1320,7 +1403,10 @@ export async function setupSignaling(io) {
 
     // Decline DM Call (callee rejects)
     socket.on('decline-dm-call', ({ callerId, dmId }) => {
-      console.log(`[DM Call] Recusando chamada na DM ${dmId} do chamador ${callerId}`);
+      const user = activeSockets.get(socket.id);
+      if (!user) return;
+      if (!canUserAccessChannel(user, dmId, servers, dmConversations)) return;
+
       for (const [sockId, actUser] of activeSockets.entries()) {
         if (actUser.id === callerId) {
           io.to(sockId).emit('dm-call-declined', { dmId });
@@ -1330,7 +1416,10 @@ export async function setupSignaling(io) {
 
     // Accept DM Call (callee accepts)
     socket.on('accept-dm-call', ({ callerId, dmId }) => {
-      console.log(`[DM Call] Aceitando chamada na DM ${dmId} do chamador ${callerId}`);
+      const user = activeSockets.get(socket.id);
+      if (!user) return;
+      if (!canUserAccessChannel(user, dmId, servers, dmConversations)) return;
+
       for (const [sockId, actUser] of activeSockets.entries()) {
         if (actUser.id === callerId) {
           io.to(sockId).emit('dm-call-accepted', { dmId });
@@ -1338,47 +1427,104 @@ export async function setupSignaling(io) {
       }
     });
 
-    // Pin Message (Permanent, survives 1h auto-deletion)
+    // Pin Message (Requires membership & moderation / author permission)
     socket.on('pin-message', ({ channelId, messageId }, callback) => {
       const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      if (!canUserAccessChannel(user, channelId, servers, dmConversations)) {
+        return callback && callback({ success: false, error: 'Acesso negado a este canal.' });
+      }
+
       const msgs = messageHistory.get(channelId) || [];
-      const msg = msgs.find(m => m.id === messageId);
+      const msg = msgs.find((m) => m.id === messageId);
+      if (!msg) {
+        return callback && callback({ success: false, error: 'Mensagem não encontrada.' });
+      }
 
-      if (msg) {
-        msg.isPinned = true;
-        msg.pinnedAt = new Date().toISOString();
-        msg.pinnedBy = user?.username || 'Usuário';
+      if (!canUserManageMessage(user, channelId, msg, servers, dmConversations)) {
+        return callback && callback({ success: false, error: 'Você não tem permissão para fixar mensagens neste canal.' });
+      }
 
-        storage.saveData(registeredUsers, servers, messageHistory);
+      msg.isPinned = true;
+      msg.pinnedAt = new Date().toISOString();
+      msg.pinnedBy = user.displayName || user.username || 'Usuário';
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      if (channelId.startsWith('dm-')) {
+        const parts = channelId.replace('dm-', '').split('_');
+        for (const [sockId, actUser] of activeSockets.entries()) {
+          if (parts.includes(actUser.id)) {
+            io.to(sockId).emit('message-pinned', { channelId, messageId, message: msg });
+          }
+        }
+      } else {
         io.emit('message-pinned', { channelId, messageId, message: msg });
-        if (callback) callback({ success: true, message: msg });
-      } else {
-        if (callback) callback({ success: false, error: 'Mensagem não encontrada' });
       }
+
+      if (callback) callback({ success: true, message: msg });
     });
 
-    // Unpin Message
+    // Unpin Message (Requires membership & moderation / author permission)
     socket.on('unpin-message', ({ channelId, messageId }, callback) => {
-      const msgs = messageHistory.get(channelId) || [];
-      const msg = msgs.find(m => m.id === messageId);
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
 
-      if (msg) {
-        msg.isPinned = false;
-        delete msg.pinnedAt;
-        delete msg.pinnedBy;
-
-        storage.saveData(registeredUsers, servers, messageHistory);
-        io.emit('message-unpinned', { channelId, messageId });
-        if (callback) callback({ success: true });
-      } else {
-        if (callback) callback({ success: false, error: 'Mensagem não encontrada' });
+      if (!canUserAccessChannel(user, channelId, servers, dmConversations)) {
+        return callback && callback({ success: false, error: 'Acesso negado a este canal.' });
       }
+
+      const msgs = messageHistory.get(channelId) || [];
+      const msg = msgs.find((m) => m.id === messageId);
+      if (!msg) {
+        return callback && callback({ success: false, error: 'Mensagem não encontrada.' });
+      }
+
+      if (!canUserManageMessage(user, channelId, msg, servers, dmConversations)) {
+        return callback && callback({ success: false, error: 'Você não tem permissão para desafixar mensagens neste canal.' });
+      }
+
+      msg.isPinned = false;
+      delete msg.pinnedAt;
+      delete msg.pinnedBy;
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      if (channelId.startsWith('dm-')) {
+        const parts = channelId.replace('dm-', '').split('_');
+        for (const [sockId, actUser] of activeSockets.entries()) {
+          if (parts.includes(actUser.id)) {
+            io.to(sockId).emit('message-unpinned', { channelId, messageId });
+          }
+        }
+      } else {
+        io.emit('message-unpinned', { channelId, messageId });
+      }
+
+      if (callback) callback({ success: true });
     });
 
-    // Send message (Handles Channels & DMs)
-    socket.on('send-message', ({ channelId, content, attachments }) => {
+    // Send message (Handles Channels & DMs with 25MB attachment limit & auth checks)
+    socket.on('send-message', ({ channelId, content, attachments }, callback) => {
       const user = activeSockets.get(socket.id);
-      if (!user || (!content?.trim() && (!attachments || attachments.length === 0))) return;
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      if (!canUserAccessChannel(user, channelId, servers, dmConversations)) {
+        return callback && callback({ success: false, error: 'Você não tem permissão para enviar mensagens neste canal.' });
+      }
+
+      const cleanContent = typeof content === 'string' ? content.slice(0, MAX_CONTENT_LENGTH) : '';
+
+      // Validate attachments (backend 25MB enforcement)
+      const { valid, error, sanitized } = validateAttachments(attachments);
+      if (!valid) {
+        socket.emit('chat-error', { error });
+        if (callback) callback({ success: false, error });
+        return;
+      }
+
+      if (!cleanContent.trim() && sanitized.length === 0) return;
 
       const role = DEFAULT_ROLES.find((r) => r.id === user.roleId) || DEFAULT_ROLES[3];
 
@@ -1396,8 +1542,8 @@ export async function setupSignaling(io) {
           roleColor: role.color,
           roleName: role.name
         },
-        content: content || '',
-        attachments: attachments || [],
+        content: cleanContent,
+        attachments: sanitized,
         timestamp: new Date().toISOString(),
         isPinned: false,
         reactions: []
@@ -1431,55 +1577,10 @@ export async function setupSignaling(io) {
         io.emit('new-message', message);
       }
 
-      if (content && content.startsWith('/')) {
-        handleBotCommand(channelId, content, user, io, musicBot, messageHistory, storage, servers, registeredUsers);
-      }
-    });
+      if (callback) callback({ success: true, message });
 
-    // Pin Message
-    socket.on('pin-message', ({ channelId, messageId }) => {
-      const msgs = messageHistory.get(channelId) || [];
-      const msg = msgs.find((m) => m.id === messageId);
-      if (msg) {
-        msg.isPinned = true;
-        msg.pinnedAt = new Date().toISOString();
-        const user = activeSockets.get(socket.id);
-        msg.pinnedBy = user ? (user.displayName || user.username) : 'Usuário';
-        storage.saveData(registeredUsers, servers, messageHistory);
-
-        if (channelId.startsWith('dm-')) {
-          const parts = channelId.replace('dm-', '').split('_');
-          for (const [sockId, actUser] of activeSockets.entries()) {
-            if (parts.includes(actUser.id)) {
-              io.to(sockId).emit('message-pinned', { channelId, messageId, message: msg });
-            }
-          }
-        } else {
-          io.emit('message-pinned', { channelId, messageId, message: msg });
-        }
-      }
-    });
-
-    // Unpin Message
-    socket.on('unpin-message', ({ channelId, messageId }) => {
-      const msgs = messageHistory.get(channelId) || [];
-      const msg = msgs.find((m) => m.id === messageId);
-      if (msg) {
-        msg.isPinned = false;
-        delete msg.pinnedAt;
-        delete msg.pinnedBy;
-        storage.saveData(registeredUsers, servers, messageHistory);
-
-        if (channelId.startsWith('dm-')) {
-          const parts = channelId.replace('dm-', '').split('_');
-          for (const [sockId, actUser] of activeSockets.entries()) {
-            if (parts.includes(actUser.id)) {
-              io.to(sockId).emit('message-unpinned', { channelId, messageId });
-            }
-          }
-        } else {
-          io.emit('message-unpinned', { channelId, messageId });
-        }
+      if (cleanContent && cleanContent.startsWith('/')) {
+        handleBotCommand(channelId, cleanContent, user, io, musicBot, messageHistory, storage, servers, registeredUsers);
       }
     });
 
@@ -1488,7 +1589,13 @@ export async function setupSignaling(io) {
     // ==========================================
     socket.on('join-voice', ({ channelId, serverId }, callback) => {
       const user = activeSockets.get(socket.id);
-      if (!user) return;
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
+
+      // Permission check for voice channel (prevents unauthorized entry to private voice)
+      if (!canUserAccessVoice(user, channelId, serverId, servers, dmConversations)) {
+        if (callback) callback({ success: false, error: 'Acesso negado. Você não é membro deste servidor ou conversa.' });
+        return;
+      }
 
       // Clean this user from ANY voice room they might previously be in
       for (const [rId, rUsers] of voiceRooms.entries()) {
@@ -1658,15 +1765,31 @@ export async function setupSignaling(io) {
 
     socket.on('webrtc-offer', ({ targetSocketId, offer, isScreenShare }) => {
       const sender = activeSockets.get(socket.id);
+      if (!sender || !sender.activeVoiceChannel) return;
+
+      const target = activeSockets.get(targetSocketId);
+      if (!target || !target.activeVoiceChannel) return;
+
+      // Both sockets must belong to the exact same active voice channel
+      if (sender.activeVoiceChannel !== target.activeVoiceChannel) return;
+
       io.to(targetSocketId).emit('webrtc-offer', {
         senderSocketId: socket.id,
-        senderUser: sender,
+        senderUser: sanitizeUser(sender),
         offer,
         isScreenShare
       });
     });
 
     socket.on('webrtc-answer', ({ targetSocketId, answer, isScreenShare }) => {
+      const sender = activeSockets.get(socket.id);
+      if (!sender || !sender.activeVoiceChannel) return;
+
+      const target = activeSockets.get(targetSocketId);
+      if (!target || !target.activeVoiceChannel) return;
+
+      if (sender.activeVoiceChannel !== target.activeVoiceChannel) return;
+
       io.to(targetSocketId).emit('webrtc-answer', {
         senderSocketId: socket.id,
         answer,
@@ -1675,6 +1798,14 @@ export async function setupSignaling(io) {
     });
 
     socket.on('webrtc-ice-candidate', ({ targetSocketId, candidate, isScreenShare }) => {
+      const sender = activeSockets.get(socket.id);
+      if (!sender || !sender.activeVoiceChannel) return;
+
+      const target = activeSockets.get(targetSocketId);
+      if (!target || !target.activeVoiceChannel) return;
+
+      if (sender.activeVoiceChannel !== target.activeVoiceChannel) return;
+
       io.to(targetSocketId).emit('webrtc-ice-candidate', {
         senderSocketId: socket.id,
         candidate,
