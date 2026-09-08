@@ -57,6 +57,90 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// =========================================================================
+// FEEDBACK & BUG REPORT SYSTEM (Endpoint Oracle VM)
+// =========================================================================
+const DATA_DIR = path.join(__dirname, 'data');
+const FEEDBACK_FILE = path.join(DATA_DIR, 'feedbacks.json');
+
+if (!fs.existsSync(DATA_DIR)) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
+}
+
+function readFeedbacks() {
+  if (fs.existsSync(FEEDBACK_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(FEEDBACK_FILE, 'utf-8'));
+    } catch (e) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function writeFeedbacks(feedbacks) {
+  try {
+    fs.writeFileSync(FEEDBACK_FILE, JSON.stringify(feedbacks, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('[Feedback] Error saving feedbacks:', e);
+  }
+}
+
+// 1. Envio de Feedback direto da página (sem precisar abrir Instagram)
+app.post('/api/feedback', (req, res) => {
+  const { name, contact, message, source } = req.body;
+  if (!message || !message.trim()) {
+    return res.status(400).json({ error: 'Mensagem é obrigatória.' });
+  }
+
+  const feedbacks = readFeedbacks();
+  const newFeedback = {
+    id: 'fb_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+    name: (name || 'Anônimo').trim(),
+    contact: (contact || '').trim(),
+    message: message.trim(),
+    source: source || 'landing-page',
+    createdAt: new Date().toISOString(),
+    ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress
+  };
+
+  feedbacks.unshift(newFeedback);
+  writeFeedbacks(feedbacks);
+
+  console.log(`[Feedback Recebido] ${newFeedback.name} (${newFeedback.contact}): ${newFeedback.message}`);
+  return res.json({ success: true, message: 'Feedback recebido com sucesso!', feedback: newFeedback });
+});
+
+// 2. Consulta de Feedbacks para o Admin (kaykygithub24@gmail.com)
+app.get('/api/feedback', (req, res) => {
+  const userEmail = req.headers['x-user-email'] || req.query.email;
+  const adminSecret = req.headers['x-admin-secret'] || req.query.secret;
+
+  if (userEmail !== 'kaykygithub24@gmail.com' && adminSecret !== 'kaykyadmin') {
+    return res.status(403).json({ error: 'Acesso restrito ao administrador.' });
+  }
+
+  const feedbacks = readFeedbacks();
+  return res.json({ success: true, count: feedbacks.length, feedbacks });
+});
+
+// 3. Exclusão de Feedback
+app.delete('/api/feedback/:id', (req, res) => {
+  const userEmail = req.headers['x-user-email'] || req.query.email;
+  const adminSecret = req.headers['x-admin-secret'] || req.query.secret;
+
+  if (userEmail !== 'kaykygithub24@gmail.com' && adminSecret !== 'kaykyadmin') {
+    return res.status(403).json({ error: 'Acesso restrito ao administrador.' });
+  }
+
+  const { id } = req.params;
+  let feedbacks = readFeedbacks();
+  feedbacks = feedbacks.filter(f => f.id !== id);
+  writeFeedbacks(feedbacks);
+  return res.json({ success: true, message: 'Feedback removido com sucesso.' });
+});
+
+
 // OTA In-App Auto-Updater Endpoints
 const GITHUB_CDN_ASAR = 'https://raw.githubusercontent.com/Fuzzy-Z/pulsecord-server/main/app.asar';
 
