@@ -26,13 +26,28 @@ function getYtDlpBin() {
   }
 }
 
+function getCookieArgs() {
+  const possibleCookies = [
+    path.resolve('cookies.txt'),
+    path.resolve('server', 'cookies.txt'),
+    '/home/ubuntu/PulseCord/cookies.txt'
+  ];
+  for (const c of possibleCookies) {
+    if (fs.existsSync(c)) {
+      return ['--cookies', c];
+    }
+  }
+  return [];
+}
+
 export function resolveYtDlp(queryOrUrl) {
   return new Promise((resolve, reject) => {
     const bin = getYtDlpBin();
     const isUrl = queryOrUrl.startsWith('http://') || queryOrUrl.startsWith('https://');
     const arg = isUrl ? queryOrUrl : `ytsearch1:${queryOrUrl}`;
+    const cookieArgs = getCookieArgs();
 
-    execFile(bin, ['-j', '-f', 'bestaudio/best', '--no-warnings', arg], { timeout: 18000 }, (err, stdout) => {
+    execFile(bin, ['-j', '-f', 'bestaudio/best', '--no-warnings', ...cookieArgs, arg], { timeout: 18000 }, (err, stdout) => {
       if (err) return reject(err);
       try {
         const line = stdout.trim().split('\n')[0];
@@ -66,7 +81,8 @@ export function resolveYtDlp(queryOrUrl) {
 export function searchYtDlp(query, limit = 8) {
   return new Promise((resolve) => {
     const bin = getYtDlpBin();
-    execFile(bin, ['-j', '--flat-playlist', '--no-warnings', `ytsearch${limit}:${query}`], { timeout: 12000 }, (err, stdout) => {
+    const cookieArgs = getCookieArgs();
+    execFile(bin, ['-j', '--flat-playlist', '--no-warnings', ...cookieArgs, `ytsearch${limit}:${query}`], { timeout: 12000 }, (err, stdout) => {
       if (err || !stdout) return resolve([]);
       try {
         const lines = stdout.trim().split('\n').filter(Boolean);
@@ -335,30 +351,53 @@ function scoreTrack(track, targetTitle, targetArtist, userWantsRemix) {
   const tLower = (targetTitle || '').toLowerCase();
   const aLower = (targetArtist || '').toLowerCase();
 
-  // 1. Duration check: SoundCloud Go+ previews are typically <= 45s
-  if (track.durationInSec && track.durationInSec <= 45) {
-    score -= 200; // Drop 30-second previews
-  } else if (track.durationInSec && track.durationInSec >= 60 && track.durationInSec <= 600) {
-    score += 50; // Standard full-length song
+  const norm = (str) => (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const normName = norm(name);
+  const normUser = norm(user);
+  const normTitle = norm(tLower);
+  const normArtist = norm(aLower);
+
+  // 1. Strict Artist Matching: If an artist is requested, NEVER play another singer!
+  if (normArtist && normArtist !== 'spotify' && normArtist !== 'youtube') {
+    const artistTokens = normArtist.split(/[\s,&/]+/).filter((w) => w.length > 2);
+    const hasArtistMatch = artistTokens.some((token) => normName.includes(token) || normUser.includes(token));
+
+    if (hasArtistMatch) {
+      score += 60; // Strong match for requested artist
+    } else {
+      // Massive penalty: If user requested "Silvanno Salles", do NOT accept "Bruna Karla"
+      score -= 2000;
+    }
   }
 
   // 2. Title matching
-  if (tLower && name.includes(tLower)) score += 40;
-  // 3. Artist matching
-  if (aLower && (name.includes(aLower) || user.includes(aLower))) score += 30;
+  if (normTitle) {
+    const titleTokens = normTitle.split(/[\s,&/]+/).filter((w) => w.length > 2);
+    const matchCount = titleTokens.filter((token) => normName.includes(token)).length;
+    if (matchCount > 0) {
+      score += (matchCount / titleTokens.length) * 40;
+    }
+  }
+
+  // 3. Duration check: SoundCloud Go+ previews are typically <= 45s
+  if (track.durationInSec && track.durationInSec <= 45) {
+    score -= 150; // Preview penalty
+  } else if (track.durationInSec && track.durationInSec >= 60 && track.durationInSec <= 600) {
+    score += 40; // Standard full-length song
+  }
 
   // 4. Anti-remix / fan-edit filters
   if (!userWantsRemix) {
-    if (/remix|flip|mashup|tribute|sped\s*up|speed\s*up|slowed|nightcore|reverb|karaoke|instrumental|edit/i.test(name)) {
-      score -= 60;
-    }
-    if (/cover/i.test(name) && !tLower.includes('cover')) {
+    if (/remix|flip|mashup|tribute|sped\s*up|speed\s*up|slowed|nightcore|reverb|karaoke|instrumental/i.test(name)) {
       score -= 80;
+    }
+    if (/cover/i.test(name) && !normTitle.includes('cover')) {
+      score -= 100;
     }
   }
 
   // 5. Official / original bonus
-  if (/original|official|audio/i.test(name)) {
+  if (/original|official|audio|ao vivo|clipe/i.test(name)) {
     score += 15;
   }
 
@@ -506,19 +545,25 @@ class MusicBotManager {
 
         scoredCandidates.sort((a, b) => b.score - a.score);
 
-        // Try candidate streams in scored order (skipping preview/broken ones)
-        for (const candidate of scoredCandidates.slice(0, 3)) {
+        // Try candidate streams in scored order (skipping wrong artist / low score ones)
+        for (const candidate of scoredCandidates.slice(0, 4)) {
+          if (candidate.score < -500) {
+            console.log(`[MusicBot] Skipping candidate "${candidate.track.name}" due to artist mismatch (score: ${candidate.score})`);
+            continue;
+          }
+
           try {
             const stream = await play_dl.stream(candidate.track.url);
             if (stream && stream.url) {
               const chosen = candidate.track;
+              const matchedArtist = candidate.score > -200;
               return {
                 id: 'sc-' + Date.now(),
-                title: originalTitle || chosen.name || searchTitle,
-                artist: originalArtist || chosen.user?.name || 'SoundCloud Artist',
+                title: (matchedArtist && originalTitle) ? originalTitle : (chosen.name || searchTitle),
+                artist: (matchedArtist && originalArtist) ? originalArtist : (chosen.user?.name || 'SoundCloud Artist'),
                 url: stream.url,
                 originalUrl: chosen.url || q,
-                cover: fallbackCover || chosen.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+                cover: (matchedArtist && fallbackCover) ? fallbackCover : (chosen.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop'),
                 duration: chosen.durationInSec || 0,
                 source: sourcePlatform !== 'search' ? sourcePlatform : 'soundcloud'
               };
