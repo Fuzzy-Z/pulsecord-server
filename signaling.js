@@ -348,29 +348,51 @@ export async function setupSignaling(io) {
     // 1. AUTHENTICATION & LOGIN / REGISTER
     // ==========================================
 
-    // Google OAuth 2.0 Login & Automatic Account Creation (Strict Credential Verification)
+    // Google OAuth 2.0 Login & Automatic Account Creation (Strict Verification via UserInfo or ID Token)
     socket.on('auth-google', async (rawInput, callback) => {
       try {
         const data = (rawInput && typeof rawInput.credential === 'object') ? rawInput.credential : (rawInput || {});
         let payload = null;
 
-        if (typeof data.credential !== 'string' || !data.credential.trim()) {
-          return callback && callback({ success: false, error: 'Credencial Google ausente ou inválida.' });
+        const token = data.accessToken || data.token || (typeof data.credential === 'string' ? data.credential : null);
+
+        if (!token || typeof token !== 'string' || !token.trim()) {
+          return callback && callback({ success: false, error: 'Credencial ou token Google ausente.' });
         }
 
-        try {
-          const ticket = await googleOAuthClient.verifyIdToken({
-            idToken: data.credential.trim(),
-            audience: GOOGLE_CLIENT_ID,
-          });
-          payload = ticket.getPayload();
-        } catch (verifyErr) {
-          console.warn('[Security] Google ID token verification failed:', verifyErr.message);
-          return callback && callback({ success: false, error: 'Falha na verificação de autenticidade da conta Google.' });
+        const cleanToken = token.trim();
+
+        // 1. If it's an OAuth 2.0 Access Token (from useGoogleLogin in @react-oauth/google)
+        if (data.accessToken || !cleanToken.includes('.')) {
+          try {
+            const gRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+              headers: { Authorization: `Bearer ${cleanToken}` }
+            });
+            if (gRes.ok) {
+              payload = await gRes.json();
+            } else {
+              console.warn('[Security] Google userinfo fetch failed with status:', gRes.status);
+            }
+          } catch (fetchErr) {
+            console.warn('[Security] Google userinfo network error:', fetchErr.message);
+          }
+        }
+
+        // 2. If it's an ID Token (JWT with 3 parts from Google Identity Services)
+        if (!payload && cleanToken.includes('.')) {
+          try {
+            const ticket = await googleOAuthClient.verifyIdToken({
+              idToken: cleanToken,
+              audience: GOOGLE_CLIENT_ID,
+            });
+            payload = ticket.getPayload();
+          } catch (verifyErr) {
+            console.warn('[Security] Google ID token verification failed:', verifyErr.message);
+          }
         }
 
         if (!payload || !payload.email || !payload.sub) {
-          return callback && callback({ success: false, error: 'Token Google inválido ou sem identificador de conta.' });
+          return callback && callback({ success: false, error: 'Falha na verificação de autenticidade da conta Google.' });
         }
 
         const normEmail = payload.email.trim().toLowerCase();
@@ -607,6 +629,7 @@ export async function setupSignaling(io) {
       };
 
       guestUser.token = signUserToken(guestUser);
+      registeredUsers.push(guestUser);
 
       // Add to default server
       const defaultServer = servers.find((s) => s.id === 'server-1');
