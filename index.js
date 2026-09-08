@@ -35,7 +35,13 @@ const DIST_PATH = fs.existsSync(path.join(__dirname, 'dist'))
 // Serve static web app bundle if present
 if (fs.existsSync(DIST_PATH)) {
   console.log(`[Voxel Web] Serving static frontend from: ${DIST_PATH}`);
-  app.use(express.static(DIST_PATH));
+  app.use(express.static(DIST_PATH, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+    }
+  }));
 }
 
 app.get('/api/status', (req, res) => {
@@ -246,6 +252,7 @@ if (fs.existsSync(DIST_PATH)) {
     if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) {
       return next();
     }
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.sendFile(path.join(DIST_PATH, 'index.html'));
   });
 }
