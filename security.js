@@ -1,62 +1,136 @@
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'voxel-pulsecord-jwt-secret-key-2026-production-secure';
-const JWT_EXPIRES_IN = '30d';
+const DEFAULT_EXPIRY_DAYS = 30;
 
 /**
- * Signs a standard JSON Web Token for authenticated sessions.
+ * Encodes string/object to standard URL-safe Base64.
  */
-export function signUserToken(user) {
-  return jwt.sign(
-    {
-      userId: user.id,
-      email: user.email || '',
-      username: user.username || ''
-    },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
-  );
+function base64UrlEncode(input) {
+  const str = typeof input === 'string' ? input : JSON.stringify(input);
+  return Buffer.from(str).toString('base64url');
 }
 
 /**
- * Cryptographically verifies a JWT session token.
- * Returns decoded payload if valid, or null if invalid/expired.
+ * Decodes URL-safe Base64 to string.
+ */
+function base64UrlDecode(str) {
+  return Buffer.from(str, 'base64url').toString('utf8');
+}
+
+/**
+ * Signs a standard RFC 7519 JSON Web Token (HS256) using Node.js native crypto.
+ * No external npm dependencies required.
+ */
+export function signUserToken(user, expiresInDays = DEFAULT_EXPIRY_DAYS) {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const exp = Math.floor(Date.now() / 1000) + (expiresInDays * 24 * 60 * 60);
+  const payload = {
+    userId: user.id,
+    email: user.email || '',
+    username: user.username || '',
+    exp
+  };
+
+  const encodedHeader = base64UrlEncode(header);
+  const encodedPayload = base64UrlEncode(payload);
+  const signatureInput = `${encodedHeader}.${encodedPayload}`;
+
+  const signature = crypto
+    .createHmac('sha256', JWT_SECRET)
+    .update(signatureInput)
+    .digest('base64url');
+
+  return `${signatureInput}.${signature}`;
+}
+
+/**
+ * Cryptographically verifies a JWT session token using constant-time comparison.
+ * Returns decoded payload if valid and unexpired, or null otherwise.
  */
 export function verifyUserToken(token) {
   if (!token || typeof token !== 'string') return null;
   try {
     const cleanToken = token.startsWith('Bearer ') ? token.slice(7).trim() : token.trim();
-    return jwt.verify(cleanToken, JWT_SECRET);
+    const parts = cleanToken.split('.');
+    if (parts.length !== 3) return null;
+
+    const [headerB64, payloadB64, signature] = parts;
+    const signatureInput = `${headerB64}.${payloadB64}`;
+
+    const expectedSignature = crypto
+      .createHmac('sha256', JWT_SECRET)
+      .update(signatureInput)
+      .digest('base64url');
+
+    // Constant-time check to prevent timing attacks
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expectedSignature);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+
+    const payload = JSON.parse(base64UrlDecode(payloadB64));
+    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) {
+      return null; // Token expired
+    }
+
+    return payload;
   } catch (err) {
     return null;
   }
 }
 
 /**
- * Securely hashes a plain-text password with bcrypt (cost factor 10).
+ * Securely hashes a password using Node.js native scrypt.
+ * Output format: scrypt$<salt>$<hash>
  */
 export async function hashPassword(plainPassword) {
   if (!plainPassword) return '';
-  return await bcrypt.hash(plainPassword, 10);
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derivedKey = crypto.scryptSync(plainPassword, salt, 64);
+  return `scrypt$${salt}$${derivedKey.toString('hex')}`;
 }
 
 /**
- * Compares plain-text password with stored hash.
- * Supports transparent upgrade for legacy plain-text passwords.
+ * Verifies a plain-text password against a stored hash.
+ * Supports:
+ * 1. Native scrypt ($scrypt$...)
+ * 2. Bcrypt ($2a$, $2b$) if available
+ * 3. Legacy plain-text fallback (automatically triggers rehash)
  */
 export async function verifyPassword(plainPassword, storedPassword) {
   if (!storedPassword || !plainPassword) return { match: false, needsRehash: false };
 
-  // Check if stored password is a bcrypt hash ($2a$, $2b$, $2y$)
-  const isBcrypt = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(storedPassword);
-
-  if (isBcrypt) {
-    const match = await bcrypt.compare(plainPassword, storedPassword);
-    return { match, needsRehash: false };
+  // 1. Native Node.js Scrypt
+  if (storedPassword.startsWith('scrypt$')) {
+    const parts = storedPassword.split('$');
+    if (parts.length === 3) {
+      const salt = parts[1];
+      const hash = parts[2];
+      try {
+        const derivedKey = crypto.scryptSync(plainPassword, salt, 64);
+        const match = crypto.timingSafeEqual(Buffer.from(hash, 'hex'), derivedKey);
+        return { match, needsRehash: false };
+      } catch (e) {
+        return { match: false, needsRehash: false };
+      }
+    }
   }
 
-  // Legacy plain-text fallback (allows seamless migration)
+  // 2. Bcrypt hash check (transparently check if bcryptjs is available)
+  if (/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(storedPassword)) {
+    try {
+      const bcryptModule = await import('bcryptjs');
+      const bcrypt = bcryptModule.default || bcryptModule;
+      const match = await bcrypt.compare(plainPassword, storedPassword);
+      return { match, needsRehash: true }; // Rehash to native scrypt on match
+    } catch (e) {
+      // bcryptjs not available in current environment
+    }
+  }
+
+  // 3. Legacy plain-text fallback (upgrade to scrypt on first successful login)
   if (storedPassword === plainPassword) {
     return { match: true, needsRehash: true };
   }
@@ -65,7 +139,7 @@ export async function verifyPassword(plainPassword, storedPassword) {
 }
 
 /**
- * Sanitizes a user object, stripping sensitive credentials.
+ * Sanitizes a user object, removing sensitive credentials.
  */
 export function sanitizeUser(user) {
   if (!user) return null;
@@ -101,7 +175,6 @@ export function validateAttachments(attachments) {
     // Check base64 string length (~35 million characters for 25MB binary)
     if (typeof att.dataUrl === 'string') {
       const b64Len = att.dataUrl.length;
-      // Approx base64: 4 chars = 3 bytes -> 25MB = ~34.9M chars
       if (b64Len > 35 * 1024 * 1024) {
         return { valid: false, error: `Arquivo ${att.name || ''} excede o limite máximo de 25MB.` };
       }
@@ -140,7 +213,6 @@ export function canUserAccessChannel(user, channelId, servers, dmConversations) 
   // 2. Server Channel checks
   const targetServer = servers.find((s) => s.channels && s.channels.some((c) => c.id === channelId));
   if (!targetServer) {
-    // Channel not associated with any server (fallback / orphaned)
     return true;
   }
 
@@ -213,6 +285,5 @@ export function canUserManageMessage(user, channelId, message, servers, dmConver
   if (user.roleId === 'role-admin' || user.roleId === 'role-mod') return true;
   if (user.isAdmin || user.isModerator) return true;
 
-  // If member has permission in server roles
   return false;
 }

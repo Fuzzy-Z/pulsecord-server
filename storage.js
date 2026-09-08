@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -145,12 +145,14 @@ export class StorageManager {
   async saveData(users, servers, messageHistoryMap) {
     const historyObj = Object.fromEntries(messageHistoryMap);
 
-    // Cryptographically protect stored passwords using bcrypt
+    // Cryptographically protect stored passwords using native scrypt
     const safeUsers = (users || []).map((u) => {
       const copy = { ...u };
-      if (copy.password && typeof copy.password === 'string' && !copy.password.startsWith('$2')) {
+      if (copy.password && typeof copy.password === 'string' && !copy.password.startsWith('$2') && !copy.password.startsWith('scrypt$')) {
         try {
-          copy.password = bcrypt.hashSync(copy.password, 10);
+          const salt = crypto.randomBytes(16).toString('hex');
+          const derivedKey = crypto.scryptSync(copy.password, salt, 64);
+          copy.password = `scrypt$${salt}$${derivedKey.toString('hex')}`;
         } catch (e) {
           console.error('[Storage] Error hashing password for user:', copy.id, e.message);
         }
