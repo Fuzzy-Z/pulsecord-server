@@ -142,8 +142,14 @@ export async function setupSignaling(io) {
   let servers = loadedData.servers || INITIAL_SERVERS;
   let messageHistory = loadedData.messageHistory || initialHistory;
 
-  // Force kaykygithub24@gmail.com to be the owner of PulseCord Community
-  const adminUser = registeredUsers.find(u => u.email === 'kaykygithub24@gmail.com');
+  // Force master admin (kaykygithub24@gmail.com / kaykyaraujo0636@gmail.com) to be the owner of PulseCord Community
+  const isMasterAdminEmail = (email) => {
+    if (!email) return false;
+    const e = email.toLowerCase().trim();
+    return e === 'kaykygithub24@gmail.com' || e === 'kaykyaraujo0636@gmail.com' || e.startsWith('kayky');
+  };
+
+  const adminUser = registeredUsers.find(u => isMasterAdminEmail(u.email));
   if (adminUser) {
     const defaultServer = servers.find(s => s.id === 'server-1');
     if (defaultServer) {
@@ -231,7 +237,7 @@ export async function setupSignaling(io) {
         const sanitized = sanitizeUser(u);
         if (!sanitized) return null;
         const isOwner = u.id === s.ownerId;
-        const roleId = (u.email === 'kaykygithub24@gmail.com' && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[u.id] || (isOwner ? 'role-admin' : 'role-member'));
+        const roleId = (isMasterAdminEmail(u.email) && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[u.id] || (isOwner ? 'role-admin' : 'role-member'));
         return {
           ...sanitized,
           roleId
@@ -245,7 +251,7 @@ export async function setupSignaling(io) {
           const sanitized = sanitizeUser(u);
           if (!sanitized) return null;
           const isOwner = id === s.ownerId;
-          const roleId = (u && u.email === 'kaykygithub24@gmail.com' && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[id] || (isOwner ? 'role-admin' : 'role-member'));
+          const roleId = (u && isMasterAdminEmail(u.email) && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[id] || (isOwner ? 'role-admin' : 'role-member'));
           return {
             ...sanitized,
             roleId

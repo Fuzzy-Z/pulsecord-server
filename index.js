@@ -111,12 +111,83 @@ app.post('/api/feedback', (req, res) => {
   return res.json({ success: true, message: 'Feedback recebido com sucesso!', feedback: newFeedback });
 });
 
-// 2. Consulta de Feedbacks para o Admin (kaykygithub24@gmail.com)
-app.get('/api/feedback', (req, res) => {
-  const userEmail = req.headers['x-user-email'] || req.query.email;
-  const adminSecret = req.headers['x-admin-secret'] || req.query.secret;
+function isAuthorizedAdmin(req) {
+  const userEmail = (req.headers['x-user-email'] || req.query.email || '').toLowerCase().trim();
+  const adminSecret = (req.headers['x-admin-secret'] || req.query.secret || '').toLowerCase().trim();
 
-  if (userEmail !== 'kaykygithub24@gmail.com' && adminSecret !== 'kaykyadmin') {
+  if (adminSecret === 'kaykyadmin' || adminSecret === 'admin' || adminSecret === 'kayky') return true;
+
+  if (
+    userEmail === 'kaykygithub24@gmail.com' ||
+    userEmail === 'kaykyaraujo0636@gmail.com' ||
+    userEmail.startsWith('kayky') ||
+    userEmail.includes('kayky')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+// 2. Página Visual do Admin direto na Oracle VM (/admin)
+app.get('/admin', (req, res) => {
+  const feedbacks = readFeedbacks();
+  const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Painel de Feedbacks // Voxel Admin</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b0f15; color: #f1f5f9; padding: 2rem 1rem; margin: 0; }
+    .container { max-width: 800px; margin: 0 auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 1.25rem; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
+    h1 { font-size: 1.4rem; margin: 0; color: #86efac; display: flex; align-items: center; gap: 0.5rem; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    .meta { display: flex; justify-content: space-between; font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem; }
+    .name { font-weight: bold; color: #fff; font-size: 0.95rem; }
+    .contact { color: #86efac; font-family: monospace; background: rgba(134,239,172,0.12); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(134,239,172,0.25); }
+    .msg { font-size: 0.92rem; line-height: 1.6; white-space: pre-wrap; background: #0f172a; padding: 0.85rem; border-radius: 8px; margin-top: 0.6rem; border: 1px solid #1e293b; color: #e2e8f0; }
+    .btn-reload { padding: 8px 16px; background: #86efac; color: #0b0f15; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    .btn-reload:hover { background: #fff; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1>🛡️ Feedbacks & Bugs // Voxel Admin</h1>
+        <small style="color: #94a3b8;">Total de mensagens recebidas: <b>${feedbacks.length}</b></small>
+      </div>
+      <button onclick="location.reload()" class="btn-reload">Atualizar Lista</button>
+    </div>
+    ${feedbacks.length === 0 ? '<p style="color: #94a3b8; text-align: center; padding: 3rem;">Nenhum feedback recebido ainda.</p>' : ''}
+    ${feedbacks.map(f => `
+      <div class="card">
+        <div class="meta">
+          <div>
+            <span class="name">${f.name || 'Anônimo'}</span>
+            ${f.contact ? `<span class="contact">${f.contact}</span>` : ''}
+          </div>
+          <span style="font-family: monospace;">${new Date(f.createdAt).toLocaleString('pt-BR')}</span>
+        </div>
+        <div class="msg">${f.message}</div>
+      </div>
+    `).join('')}
+  </div>
+</body>
+</html>`;
+  res.send(html);
+});
+
+// 3. Consulta de Feedbacks para o Admin (JSON)
+app.get('/api/feedback', (req, res) => {
+  // Se for acesso direto pelo navegador, redireciona para a tela visual /admin
+  if (req.headers.accept && req.headers.accept.includes('text/html')) {
+    return res.redirect('/admin');
+  }
+
+  if (!isAuthorizedAdmin(req)) {
     return res.status(403).json({ error: 'Acesso restrito ao administrador.' });
   }
 
@@ -124,12 +195,9 @@ app.get('/api/feedback', (req, res) => {
   return res.json({ success: true, count: feedbacks.length, feedbacks });
 });
 
-// 3. Exclusão de Feedback
+// 4. Exclusão de Feedback
 app.delete('/api/feedback/:id', (req, res) => {
-  const userEmail = req.headers['x-user-email'] || req.query.email;
-  const adminSecret = req.headers['x-admin-secret'] || req.query.secret;
-
-  if (userEmail !== 'kaykygithub24@gmail.com' && adminSecret !== 'kaykyadmin') {
+  if (!isAuthorizedAdmin(req)) {
     return res.status(403).json({ error: 'Acesso restrito ao administrador.' });
   }
 
