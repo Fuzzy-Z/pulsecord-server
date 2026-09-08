@@ -3,17 +3,27 @@ import { execFile } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
-// yt-dlp discovery and auto-downloader
+// yt-dlp discovery with strict OS separation (never execute .exe on Linux)
 function getYtDlpBin() {
-  const localWin = path.resolve('yt-dlp.exe');
-  if (fs.existsSync(localWin)) return localWin;
-  const localLinux = path.resolve('yt-dlp');
-  if (fs.existsSync(localLinux)) return localLinux;
-  const serverWin = path.resolve('server', 'yt-dlp.exe');
-  if (fs.existsSync(serverWin)) return serverWin;
-  const serverLinux = path.resolve('server', 'yt-dlp');
-  if (fs.existsSync(serverLinux)) return serverLinux;
-  return 'yt-dlp';
+  const isWin = process.platform === 'win32';
+  if (isWin) {
+    const localWin = path.resolve('yt-dlp.exe');
+    if (fs.existsSync(localWin)) return localWin;
+    const serverWin = path.resolve('server', 'yt-dlp.exe');
+    if (fs.existsSync(serverWin)) return serverWin;
+    return 'yt-dlp.exe';
+  } else {
+    // Linux / Darwin: NEVER execute Windows .exe binaries!
+    const sysLocal = '/usr/local/bin/yt-dlp';
+    if (fs.existsSync(sysLocal)) return sysLocal;
+    const sysBin = '/usr/bin/yt-dlp';
+    if (fs.existsSync(sysBin)) return sysBin;
+    const localLinux = path.resolve('yt-dlp');
+    if (fs.existsSync(localLinux) && !localLinux.endsWith('.exe')) return localLinux;
+    const serverLinux = path.resolve('server', 'yt-dlp');
+    if (fs.existsSync(serverLinux) && !serverLinux.endsWith('.exe')) return serverLinux;
+    return 'yt-dlp';
+  }
 }
 
 export function resolveYtDlp(queryOrUrl) {
@@ -22,7 +32,7 @@ export function resolveYtDlp(queryOrUrl) {
     const isUrl = queryOrUrl.startsWith('http://') || queryOrUrl.startsWith('https://');
     const arg = isUrl ? queryOrUrl : `ytsearch1:${queryOrUrl}`;
 
-    execFile(bin, ['-j', '-f', 'bestaudio/best', '--no-warnings', arg], { timeout: 18000 }, (err, stdout, stderr) => {
+    execFile(bin, ['-j', '-f', 'bestaudio/best', '--no-warnings', arg], { timeout: 18000 }, (err, stdout) => {
       if (err) return reject(err);
       try {
         const line = stdout.trim().split('\n')[0];
@@ -87,9 +97,62 @@ export function searchYtDlp(query, limit = 8) {
   });
 }
 
+// -------------------------------------------------------------
+// Layer 1: Metadata Extraction (Spotify, Apple Music, Deezer)
+// -------------------------------------------------------------
+
 export async function parseSpotifyUrl(url) {
   try {
-    const res = await fetch(url, {
+    const cleanUrl = (url || '').trim().split('?')[0];
+
+    // 1. Primary: Spotify Official oEmbed API (High precision, no API key required)
+    try {
+      const oembedRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(cleanUrl)}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      });
+      if (oembedRes.ok) {
+        const oembed = await oembedRes.json();
+        let title = oembed.title || '';
+        let artist = '';
+        const cover = oembed.thumbnail_url || '';
+
+        // Extract artist from the lightweight iframe embed
+        if (oembed.iframe_url) {
+          try {
+            const embRes = await fetch(oembed.iframe_url, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+            });
+            if (embRes.ok) {
+              const embHtml = await embRes.text();
+              const nextDataMatch = embHtml.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]+?)<\/script>/);
+              if (nextDataMatch) {
+                const data = JSON.parse(nextDataMatch[1]);
+                const entity = data.props?.pageProps?.state?.data?.entity;
+                if (entity?.artists && Array.isArray(entity.artists)) {
+                  artist = entity.artists.map((a) => a.name).join(', ');
+                }
+              }
+              if (!artist) {
+                const byMatch = embHtml.match(/by\s+([^<|"]+)/i);
+                if (byMatch) artist = byMatch[1].trim();
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (title) {
+          title = title.replace(/\s*[-–]\s*Album.*$/i, '').replace(/\s*\|\s*Spotify.*$/i, '').trim();
+          const query = artist ? `${artist} - ${title}` : title;
+          console.log(`[MusicBot] Extracted Spotify track via oEmbed: "${query}"`);
+          return { title, artist, cover, query };
+        }
+      }
+    } catch (oembedErr) {
+      console.warn('[MusicBot] Spotify oEmbed error:', oembedErr.message);
+    }
+
+    // 2. Fallback: Direct HTML scraping
+    const res = await fetch(cleanUrl, {
       headers: {
         'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'
       }
@@ -125,14 +188,61 @@ export async function parseSpotifyUrl(url) {
       title = title.replace(/\s*[-–]\s*Album.*$/i, '').replace(/\s*\|\s*Spotify.*$/i, '').trim();
     }
 
+    const query = artist ? `${artist} - ${title}` : title;
     return {
       title,
       artist,
       cover,
-      query: artist ? `${artist} - ${title}` : title
+      query
     };
   } catch (err) {
     console.warn('[MusicBot] parseSpotifyUrl error:', err.message);
+    return null;
+  }
+}
+
+export async function parseAppleMusicUrl(url) {
+  try {
+    const cleanUrl = (url || '').trim().split('?')[0];
+    const res = await fetch(cleanUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const titleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i) ||
+                       html.match(/<meta\s+content=["']([^"']+)["']\s+property=["']og:title["']/i);
+    const descMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i) ||
+                      html.match(/<meta\s+content=["']([^"']+)["']\s+property=["']og:description["']/i);
+    const imageMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i);
+
+    let title = titleMatch ? titleMatch[1].replace(/\s*[-–]\s*Single.*$/i, '').replace(/\s*[-–]\s*Album.*$/i, '').trim() : '';
+    let artist = '';
+    const desc = descMatch ? descMatch[1] : '';
+    const cover = imageMatch ? imageMatch[1] : '';
+
+    if (desc) {
+      const byMatch = desc.match(/by\s+([^·\.\n]+)/i);
+      if (byMatch) artist = byMatch[1].trim();
+    }
+    const query = artist ? `${artist} - ${title}` : title;
+    return { title, artist, cover, query };
+  } catch (e) {
+    return null;
+  }
+}
+
+export async function parseDeezerUrl(url) {
+  try {
+    const cleanUrl = (url || '').trim().split('?')[0];
+    const res = await fetch(`https://api.deezer.com/oembed?url=${encodeURIComponent(cleanUrl)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const title = data.title || '';
+    const artist = data.author_name || '';
+    const cover = data.thumbnail_url || '';
+    const query = artist ? `${artist} - ${title}` : title;
+    return { title, artist, cover, query };
+  } catch (e) {
     return null;
   }
 }
@@ -215,6 +325,46 @@ export function cleanMusicTitle(rawTitle) {
     .trim();
 }
 
+// -------------------------------------------------------------
+// Layer 2: Scoring & Candidate Matching Algorithm
+// -------------------------------------------------------------
+function scoreTrack(track, targetTitle, targetArtist, userWantsRemix) {
+  let score = 0;
+  const name = (track.name || '').toLowerCase();
+  const user = (track.user?.name || '').toLowerCase();
+  const tLower = (targetTitle || '').toLowerCase();
+  const aLower = (targetArtist || '').toLowerCase();
+
+  // 1. Duration check: SoundCloud Go+ previews are typically <= 45s
+  if (track.durationInSec && track.durationInSec <= 45) {
+    score -= 200; // Drop 30-second previews
+  } else if (track.durationInSec && track.durationInSec >= 60 && track.durationInSec <= 600) {
+    score += 50; // Standard full-length song
+  }
+
+  // 2. Title matching
+  if (tLower && name.includes(tLower)) score += 40;
+  // 3. Artist matching
+  if (aLower && (name.includes(aLower) || user.includes(aLower))) score += 30;
+
+  // 4. Anti-remix / fan-edit filters
+  if (!userWantsRemix) {
+    if (/remix|flip|mashup|tribute|sped\s*up|speed\s*up|slowed|nightcore|reverb|karaoke|instrumental|edit/i.test(name)) {
+      score -= 60;
+    }
+    if (/cover/i.test(name) && !tLower.includes('cover')) {
+      score -= 80;
+    }
+  }
+
+  // 5. Official / original bonus
+  if (/original|official|audio/i.test(name)) {
+    score += 15;
+  }
+
+  return score;
+}
+
 class MusicBotManager {
   constructor(io) {
     this.io = io;
@@ -237,8 +387,11 @@ class MusicBotManager {
     return this.channelPlayers.get(channelId);
   }
 
+  // -------------------------------------------------------------
+  // Layer 3: Audio Stream Resolution Engine
+  // -------------------------------------------------------------
   async resolveMetadata(query) {
-    const q = query.trim();
+    const q = (query || '').trim();
 
     // 1. Direct audio stream or file URL (.mp3, .aac, .m4a, .ogg, streaming stations)
     if (
@@ -261,29 +414,53 @@ class MusicBotManager {
     }
 
     let searchTitle = q;
-    let fallbackArtist = '';
+    let originalTitle = '';
+    let originalArtist = '';
     let fallbackCover = '';
-    let isSpotify = false;
-    let isYouTube = false;
+    let sourcePlatform = 'search';
 
-    // 2. Spotify Link: Extract title, artist, and high-res cover via Spotify page scraping
+    // 2. Metadata Extraction Layer (Spotify / Apple Music / Deezer)
     if (q.includes('open.spotify.com/')) {
-      isSpotify = true;
+      sourcePlatform = 'spotify';
       try {
         const spotifyData = await parseSpotifyUrl(q);
         if (spotifyData && spotifyData.title) {
+          originalTitle = spotifyData.title;
+          originalArtist = spotifyData.artist;
           searchTitle = spotifyData.query || spotifyData.title;
-          fallbackArtist = spotifyData.artist || 'Spotify';
           fallbackCover = spotifyData.cover || '';
         }
       } catch (err) {
         console.warn('[MusicBot] Spotify parse error:', err.message);
       }
-    }
-
-    // 3. YouTube Link: Direct resolution with yt-dlp
-    if (q.includes('youtube.com/') || q.includes('youtu.be/')) {
-      isYouTube = true;
+    } else if (q.includes('music.apple.com/')) {
+      sourcePlatform = 'apple';
+      try {
+        const appleData = await parseAppleMusicUrl(q);
+        if (appleData && appleData.title) {
+          originalTitle = appleData.title;
+          originalArtist = appleData.artist;
+          searchTitle = appleData.query || appleData.title;
+          fallbackCover = appleData.cover || '';
+        }
+      } catch (err) {
+        console.warn('[MusicBot] Apple Music parse error:', err.message);
+      }
+    } else if (q.includes('deezer.com/')) {
+      sourcePlatform = 'deezer';
+      try {
+        const deezerData = await parseDeezerUrl(q);
+        if (deezerData && deezerData.title) {
+          originalTitle = deezerData.title;
+          originalArtist = deezerData.artist;
+          searchTitle = deezerData.query || deezerData.title;
+          fallbackCover = deezerData.cover || '';
+        }
+      } catch (err) {
+        console.warn('[MusicBot] Deezer parse error:', err.message);
+      }
+    } else if (q.includes('youtube.com/') || q.includes('youtu.be/')) {
+      sourcePlatform = 'youtube';
       try {
         const ytTrack = await resolveYtDlp(q);
         if (ytTrack && ytTrack.url) {
@@ -294,72 +471,70 @@ class MusicBotManager {
       }
     }
 
-    // 4. Primary: Try streaming high-fidelity audio via yt-dlp (Original Official Tracks)
+    // 3. Audio Streaming Resolution - Provider A: yt-dlp (YouTube stream)
     try {
       const ytTrack = await resolveYtDlp(searchTitle);
       if (ytTrack && ytTrack.url) {
+        if (originalTitle) ytTrack.title = originalTitle;
+        if (originalArtist) ytTrack.artist = originalArtist;
         if (fallbackCover) ytTrack.cover = fallbackCover;
-        if (fallbackArtist && fallbackArtist !== 'YouTube') ytTrack.artist = fallbackArtist;
-        ytTrack.source = isSpotify ? 'spotify' : isYouTube ? 'youtube' : 'youtube';
+        ytTrack.source = sourcePlatform !== 'search' ? sourcePlatform : 'youtube';
         return ytTrack;
       }
     } catch (err) {
-      console.warn('[MusicBot] yt-dlp search resolution error:', err.message);
+      console.warn('[MusicBot] yt-dlp search stream skipped (likely IP block / unsupported env):', err.message);
     }
 
-    // 5. Secondary: Try streaming via SoundCloud with strict anti-remix / anti-spedup filter
+    // 4. Audio Streaming Resolution - Provider B: SoundCloud with Candidate Scoring
     try {
       await ensureSoundCloud();
       const cleanedQuery = cleanMusicTitle(searchTitle);
-      const scResults = await play_dl.search(cleanedQuery, { source: { soundcloud: 'tracks' }, limit: 12 });
+      const lowerQ = cleanedQuery.toLowerCase();
+      const userWantsRemix = /sped\s*up|speed\s*up|slowed|pitch|remix|nightcore|cover|mashup|edit/i.test(lowerQ);
+
+      let scResults = await play_dl.search(cleanedQuery, { source: { soundcloud: 'tracks' }, limit: 12 });
+      if (!scResults || scResults.length === 0) {
+        scResults = await play_dl.search(cleanMusicTitle(originalTitle || searchTitle), { source: { soundcloud: 'tracks' }, limit: 12 });
+      }
+
       if (scResults && scResults.length > 0) {
-        const lowerQ = cleanedQuery.toLowerCase();
-        const userWantsRemix = /sped\s*up|speed\s*up|slowed|pitch|remix|nightcore|cover|mashup|edit/i.test(lowerQ);
+        // Score candidate tracks
+        const scoredCandidates = scResults.map((t) => ({
+          track: t,
+          score: scoreTrack(t, originalTitle || cleanedQuery, originalArtist, userWantsRemix)
+        }));
 
-        // Filter out fan edits unless user explicitly asked for them
-        let candidateTracks = scResults;
-        if (!userWantsRemix) {
-          const cleanFiltered = scResults.filter((t) => {
-            const name = (t.name || '').toLowerCase();
-            return !/sped\s*up|speed\s*up|slowed|pitch|remix|nightcore|cover|mashup|edit/i.test(name);
-          });
-          if (cleanFiltered.length > 0) candidateTracks = cleanFiltered;
-        }
+        scoredCandidates.sort((a, b) => b.score - a.score);
 
-        const queryWords = lowerQ.split(/[\s-]+/).filter((w) => w.length > 2);
-        let bestTrack = candidateTracks[0];
-
-        for (const t of candidateTracks) {
-          const tName = (t.name || '').toLowerCase();
-          const tUser = (t.user?.name || '').toLowerCase();
-          const matchCount = queryWords.filter((w) => tName.includes(w) || tUser.includes(w)).length;
-          if (matchCount >= 2 || (queryWords.length <= 1 && matchCount >= 1)) {
-            bestTrack = t;
-            break;
+        // Try candidate streams in scored order (skipping preview/broken ones)
+        for (const candidate of scoredCandidates.slice(0, 3)) {
+          try {
+            const stream = await play_dl.stream(candidate.track.url);
+            if (stream && stream.url) {
+              const chosen = candidate.track;
+              return {
+                id: 'sc-' + Date.now(),
+                title: originalTitle || chosen.name || searchTitle,
+                artist: originalArtist || chosen.user?.name || 'SoundCloud Artist',
+                url: stream.url,
+                originalUrl: chosen.url || q,
+                cover: fallbackCover || chosen.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+                duration: chosen.durationInSec || 0,
+                source: sourcePlatform !== 'search' ? sourcePlatform : 'soundcloud'
+              };
+            }
+          } catch (stErr) {
+            console.warn('[MusicBot] Candidate stream attempt failed:', stErr.message);
           }
-        }
-
-        const stream = await play_dl.stream(bestTrack.url);
-        if (stream && stream.url) {
-          return {
-            id: 'sc-' + Date.now(),
-            title: bestTrack.name || searchTitle,
-            artist: bestTrack.user?.name || fallbackArtist || 'SoundCloud Artist',
-            url: stream.url,
-            originalUrl: bestTrack.url || q,
-            cover: bestTrack.thumbnail || fallbackCover || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
-            duration: bestTrack.durationInSec || 0,
-            source: isSpotify ? 'spotify' : isYouTube ? 'youtube' : 'soundcloud'
-          };
         }
       }
     } catch (err) {
       console.warn('[MusicBot] SoundCloud stream resolution error:', err.message);
     }
 
-    // 6. Full Streaming Fallback: Search Audius (Full length tracks)
+    // 5. Audio Streaming Resolution - Provider C: Audius Full Tracks
     try {
-      const cleanedQuery = cleanMusicTitle(searchTitle);
+      const cleanedQuery = cleanMusicTitle(originalTitle || searchTitle);
       const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(cleanedQuery)}&app_name=pulsecord`);
       if (audiusRes.ok) {
         const audiusData = await audiusRes.json();
@@ -367,13 +542,13 @@ class MusicBotManager {
           const track = audiusData.data[0];
           return {
             id: 'audius-' + track.id,
-            title: track.title || searchTitle,
-            artist: track.user?.name || fallbackArtist || 'Audius Artist',
+            title: originalTitle || track.title || searchTitle,
+            artist: originalArtist || track.user?.name || 'Audius Artist',
             url: `https://discoveryprovider.audius.co/v1/tracks/${track.id}/stream?app_name=pulsecord`,
             originalUrl: q,
-            cover: track.artwork?.['480x480'] || track.artwork?.['150x150'] || fallbackCover || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+            cover: fallbackCover || track.artwork?.['480x480'] || track.artwork?.['150x150'] || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
             duration: track.duration || 0,
-            source: 'audius'
+            source: sourcePlatform !== 'search' ? sourcePlatform : 'audius'
           };
         }
       }
@@ -381,7 +556,7 @@ class MusicBotManager {
       console.warn('[MusicBot] Audius audio resolution error:', err.message);
     }
 
-    // 7. Check preset keywords
+    // 6. Check preset keywords
     const lower = q.toLowerCase();
     const match = PRESET_STREAMS.find(
       (stream) =>
@@ -394,13 +569,13 @@ class MusicBotManager {
       return { ...match, id: 'preset-' + Date.now() };
     }
 
-    // 8. Ultimate fallback: Preset radio
+    // 7. Ultimate fallback: Preset radio
     const randomPreset = PRESET_STREAMS[Math.floor(Math.random() * PRESET_STREAMS.length)];
     return {
       ...randomPreset,
       id: 'search-' + Date.now(),
-      title: searchTitle,
-      artist: fallbackArtist || 'PulseCord Radio',
+      title: originalTitle || searchTitle,
+      artist: originalArtist || 'PulseCord Radio',
       cover: fallbackCover || randomPreset.cover,
       source: 'radio'
     };
@@ -408,15 +583,32 @@ class MusicBotManager {
 
   async searchTracks(query) {
     if (!query || !query.trim()) return [];
-    const searchTitle = cleanMusicTitle(query.trim());
+    const q = query.trim();
+
+    // If query is already a URL from supported platforms, resolve it directly into 1 track
+    if (
+      q.includes('open.spotify.com/') ||
+      q.includes('music.apple.com/') ||
+      q.includes('deezer.com/') ||
+      q.includes('youtube.com/') ||
+      q.includes('youtu.be/')
+    ) {
+      try {
+        const resolved = await this.resolveMetadata(q);
+        if (resolved && resolved.url) {
+          return [resolved];
+        }
+      } catch (e) {}
+    }
+
+    const searchTitle = cleanMusicTitle(q);
     const lowerQ = searchTitle.toLowerCase();
     const userWantsRemix = /sped\s*up|speed\s*up|slowed|pitch|remix|nightcore|cover|mashup|edit/i.test(lowerQ);
 
-    // 1. YouTube Search with yt-dlp (Original Official Videos & High Quality Metadata)
+    // 1. YouTube Search with yt-dlp
     try {
       const ytResults = await searchYtDlp(searchTitle, 8);
       if (ytResults && ytResults.length > 0) {
-        // Filter out fan edits if user didn't ask for them
         let cleanYt = ytResults;
         if (!userWantsRemix) {
           const filtered = ytResults.filter((t) => !/sped\s*up|speed\s*up|slowed|nightcore|mashup/i.test(t.title || ''));
@@ -428,18 +620,21 @@ class MusicBotManager {
       console.warn('[MusicBot] YouTube search error:', err.message);
     }
 
-    // 2. Fast SoundCloud search with Anti-Spedup/Slowed filtering
+    // 2. SoundCloud search with anti-preview & scoring
     try {
       await ensureSoundCloud();
-      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 12 });
+      const scResults = await play_dl.search(searchTitle, { source: { soundcloud: 'tracks' }, limit: 14 });
       if (scResults && scResults.length > 0) {
-        let cleanSc = scResults;
+        // Discard 30-second previews
+        const fullTracks = scResults.filter((t) => !t.durationInSec || t.durationInSec > 45);
+        let candidates = fullTracks.length > 0 ? fullTracks : scResults;
+
         if (!userWantsRemix) {
-          const filtered = scResults.filter((t) => !/sped\s*up|speed\s*up|slowed|nightcore|mashup/i.test(t.name || ''));
-          if (filtered.length > 0) cleanSc = filtered;
+          const cleanFiltered = candidates.filter((t) => !/sped\s*up|speed\s*up|slowed|nightcore|mashup/i.test(t.name || ''));
+          if (cleanFiltered.length > 0) candidates = cleanFiltered;
         }
 
-        return cleanSc.slice(0, 8).map((track, i) => ({
+        return candidates.slice(0, 8).map((track, i) => ({
           id: 'sc-' + (track.id || Date.now() + '-' + i),
           title: track.name || searchTitle,
           artist: track.user?.name || 'SoundCloud Artist',
@@ -454,27 +649,26 @@ class MusicBotManager {
       console.warn('[MusicBot] SoundCloud search error:', err.message);
     }
 
-    // 3. Fallback: Search iTunes (High quality metadata & instant response)
+    // 3. Fallback: Search Audius
     try {
-      const iTunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTitle)}&media=music&limit=8`;
-      const res = await fetch(iTunesUrl);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.results && data.results.length > 0) {
-          return data.results.map((track, i) => ({
-            id: 'itunes-' + track.trackId + '-' + i,
-            title: track.trackName || searchTitle,
-            artist: track.artistName || 'Artista',
-            url: track.previewUrl || `${track.artistName} - ${track.trackName}`,
-            originalUrl: track.trackViewUrl,
-            cover: track.artworkUrl100?.replace('100x100bb', '600x600bb') || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
-            duration: 30,
-            source: 'itunes'
+      const audiusRes = await fetch(`https://discoveryprovider.audius.co/v1/tracks/search?query=${encodeURIComponent(searchTitle)}&app_name=pulsecord`);
+      if (audiusRes.ok) {
+        const audiusData = await audiusRes.json();
+        if (audiusData.data && audiusData.data.length > 0) {
+          return audiusData.data.slice(0, 8).map((track) => ({
+            id: 'audius-' + track.id,
+            title: track.title || searchTitle,
+            artist: track.user?.name || 'Audius Artist',
+            url: `https://discoveryprovider.audius.co/v1/tracks/${track.id}/stream?app_name=pulsecord`,
+            originalUrl: track.permalink || '',
+            cover: track.artwork?.['480x480'] || track.artwork?.['150x150'] || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300&h=300&fit=crop',
+            duration: track.duration || 0,
+            source: 'audius'
           }));
         }
       }
     } catch (err) {
-      console.warn('[MusicBot] iTunes search error:', err.message);
+      console.warn('[MusicBot] Audius search error:', err.message);
     }
 
     return [];
