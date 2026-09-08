@@ -508,6 +508,15 @@ class MusicBotManager {
       } catch (err) {
         console.warn('[MusicBot] yt-dlp direct url resolution error:', err.message);
       }
+    } else if (!q.startsWith('http://') && !q.startsWith('https://')) {
+      // Plain text search: extract Artist and Title if separated by hyphen
+      if (q.includes(' - ')) {
+        const parts = q.split(' - ').map((s) => s.trim()).filter(Boolean);
+        if (parts.length >= 2) {
+          originalArtist = parts[0];
+          originalTitle = parts.slice(1).join(' - ');
+        }
+      }
     }
 
     // 3. Audio Streaming Resolution - Provider A: yt-dlp (YouTube stream)
