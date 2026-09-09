@@ -51,7 +51,8 @@ export function createAdminRoutes({
 
   // 1. Admin Login
   router.post('/login', (req, res) => {
-    const { key, username } = req.body;
+    const key = req.body.key || req.body.adminKey;
+    const username = req.body.username;
     if (!key || key !== ADMIN_SECRET) {
       return res.status(403).json({ error: 'Chave mestra de administrador incorreta.' });
     }
