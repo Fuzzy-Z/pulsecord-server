@@ -173,6 +173,11 @@ export function createAdminRoutes({
 
     // Broadcast user update so all clients re-render the blue badge immediately
     io.emit('user-profile-updated', {
+      user: {
+        id: request.userId,
+        isVerified: true,
+        badges: user?.badges || []
+      },
       userId: request.userId,
       isVerified: true,
       badges: user?.badges || []
@@ -314,6 +319,14 @@ export function createAdminRoutes({
     saveState();
 
     io.emit('user-profile-updated', {
+      user: {
+        id: userId,
+        isVerified: user.isVerified,
+        isBanned: user.isBanned,
+        badges: user.badges,
+        username: user.username,
+        displayName: user.displayName
+      },
       userId,
       isVerified: user.isVerified,
       isBanned: user.isBanned,
