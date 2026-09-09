@@ -155,6 +155,12 @@ export async function setupSignaling(io, app = null) {
   let messageHistory = loadedData.messageHistory || initialHistory;
   let verificationRequests = loadedData.verificationRequests || [];
 
+  // Transient presence reset: ensure no user starts with stale gameStatus from previous sessions
+  (registeredUsers || []).forEach((u) => {
+    u.gameStatus = '';
+    u.gameStartedAt = null;
+  });
+
   // Force master admin (kaykygithub24@gmail.com / kaykyaraujo0636@gmail.com) to be verified and owner
   const isMasterAdminEmail = (email) => {
     if (!email) return false;
@@ -206,6 +212,7 @@ export async function setupSignaling(io, app = null) {
   const sanitizeUser = (u) => {
     if (!u) return null;
     const active = Array.from(activeSockets.values()).find((act) => act.id === u.id);
+    const isOnline = Boolean(active && active.status !== 'offline' && active.status !== 'invisible');
     return {
       id: u.id,
       username: u.username,
@@ -215,7 +222,8 @@ export async function setupSignaling(io, app = null) {
       avatarColor: u.avatarColor || 'from-indigo-500 to-purple-600',
       bannerUrl: u.bannerUrl || null,
       customStatus: u.customStatus || null,
-      gameStatus: u.gameStatus || null,
+      gameStatus: isOnline ? (active?.gameStatus || null) : null,
+      gameStartedAt: isOnline ? (active?.gameStartedAt || null) : null,
       roleId: u.roleId || 'role-member',
       isVerified: Boolean(u.isVerified),
       badges: u.badges || [],
@@ -790,7 +798,19 @@ export async function setupSignaling(io, app = null) {
       if (activeUser) {
         leaveCurrentVoice(socket, activeUser, io, voiceRooms, activeSockets);
         activeSockets.delete(socket.id);
-        io.emit('user-status-changed', { user: { ...activeUser, status: 'offline' } });
+        const userIndex = registeredUsers.findIndex(u => u.id === activeUser.id);
+        if (userIndex !== -1) {
+          registeredUsers[userIndex].gameStatus = '';
+          registeredUsers[userIndex].gameStartedAt = null;
+        }
+        io.emit('user-status-changed', {
+          user: {
+            ...activeUser,
+            status: 'offline',
+            gameStatus: '',
+            gameStartedAt: null
+          }
+        });
       }
       if (callback) callback({ success: true });
     });
@@ -812,6 +832,16 @@ export async function setupSignaling(io, app = null) {
           }
         }
       });
+
+      // If user went invisible/offline, active game status must be cleared
+      if (activeUser.status === 'offline' || activeUser.status === 'invisible') {
+        activeUser.gameStatus = '';
+        activeUser.gameStartedAt = null;
+        if (userIndex !== -1) {
+          registeredUsers[userIndex].gameStatus = '';
+          registeredUsers[userIndex].gameStartedAt = null;
+        }
+      }
 
       // Generate monogram avatar if display name changed and no custom URL
       if (profileData.displayName && !activeUser.avatarUrl) {
@@ -2108,7 +2138,21 @@ export async function setupSignaling(io, app = null) {
       if (user) {
         const hasOtherSockets = hasOtherConnectedSocketForUser(user.id, socket.id, activeSockets, io);
         if (!hasOtherSockets) {
-          io.emit('user-status-changed', { user: { ...user, status: 'offline' } });
+          const userIdx = registeredUsers.findIndex(u => u.id === user.id);
+          if (userIdx !== -1) {
+            registeredUsers[userIdx].gameStatus = '';
+            registeredUsers[userIdx].gameStartedAt = null;
+          }
+          user.gameStatus = '';
+          user.gameStartedAt = null;
+          io.emit('user-status-changed', {
+            user: {
+              ...user,
+              status: 'offline',
+              gameStatus: '',
+              gameStartedAt: null
+            }
+          });
         }
       }
     });
