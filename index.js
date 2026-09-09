@@ -63,6 +63,47 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// WebRTC ICE & TURN Servers configuration endpoint
+app.get('/api/ice-servers', (req, res) => {
+  const coturnHost = process.env.COTURN_HOST || '150.230.73.46';
+  const coturnPort = process.env.COTURN_PORT || '3478';
+  const coturnUser = process.env.COTURN_USER || 'voxeluser';
+  const coturnPass = process.env.COTURN_PASS || 'voxelpass2026';
+
+  res.json({
+    iceServers: [
+      {
+        urls: [
+          'stun:stun.l.google.com:19302',
+          'stun:stun1.l.google.com:19302',
+          'stun:stun2.l.google.com:19302',
+          'stun:stun3.l.google.com:19302',
+          'stun:stun4.l.google.com:19302',
+          'stun:stun.cloudflare.com:3478'
+        ]
+      },
+      {
+        urls: [
+          `turn:${coturnHost}:${coturnPort}?transport=udp`,
+          `turn:${coturnHost}:${coturnPort}?transport=tcp`
+        ],
+        username: coturnUser,
+        credential: coturnPass
+      },
+      {
+        urls: [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp'
+        ],
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ],
+    iceCandidatePoolSize: 10
+  });
+});
+
 // =========================================================================
 // FEEDBACK & BUG REPORT SYSTEM (Endpoint Oracle VM)
 // =========================================================================

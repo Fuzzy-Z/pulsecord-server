@@ -1597,22 +1597,32 @@ export async function setupSignaling(io) {
         return;
       }
 
-      // Clean this user from ANY voice room they might previously be in
-      for (const [rId, rUsers] of voiceRooms.entries()) {
-        const hasUser = rUsers.some((u) => u.id === user.id || u.socketId === socket.id);
-        if (hasUser) {
-          const filtered = rUsers.filter((u) => u.id !== user.id && u.socketId !== socket.id);
-          if (filtered.length === 0) {
-            voiceRooms.delete(rId);
-          } else {
-            voiceRooms.set(rId, filtered);
+      // 1. Strict single-channel rule: Clean this user from ALL other voice rooms
+      for (const [rId, rUsers] of Array.from(voiceRooms.entries())) {
+        if (rId !== channelId) {
+          const hasUser = rUsers.some((u) => u.id === user.id || u.socketId === socket.id);
+          if (hasUser) {
+            const filtered = rUsers.filter((u) => u.id !== user.id && u.socketId !== socket.id);
+            if (filtered.length === 0) {
+              voiceRooms.delete(rId);
+            } else {
+              voiceRooms.set(rId, filtered);
+            }
+
+            // Remove all sockets of this user from the old socket.io voice room
+            for (const [sId, actU] of activeSockets.entries()) {
+              if (actU.id === user.id) {
+                const s = io.sockets.sockets.get(sId);
+                if (s) s.leave(`voice-${rId}`);
+              }
+            }
+
+            socket.to(`voice-${rId}`).emit('user-left-voice', {
+              socketId: socket.id,
+              userId: user.id,
+              channelId: rId
+            });
           }
-          socket.leave(`voice-${rId}`);
-          socket.to(`voice-${rId}`).emit('user-left-voice', {
-            socketId: socket.id,
-            userId: user.id,
-            channelId: rId
-          });
         }
       }
 
@@ -1620,11 +1630,19 @@ export async function setupSignaling(io) {
       user.isScreenSharing = false;
       socket.join(`voice-${channelId}`);
 
+      // Also ensure any other socket for the same user is updated to avoid desync
+      for (const [sId, actU] of activeSockets.entries()) {
+        if (actU.id === user.id && sId !== socket.id) {
+          actU.activeVoiceChannel = channelId;
+        }
+      }
+
       if (!voiceRooms.has(channelId)) {
         voiceRooms.set(channelId, []);
       }
 
       const roomUsers = voiceRooms.get(channelId);
+      // Strictly remove any stale entry of this user ID or this socketId in target room before adding
       const cleanUsers = roomUsers.filter((u) => u.id !== user.id && u.socketId !== socket.id);
       cleanUsers.push({
         id: user.id,
@@ -1990,6 +2008,19 @@ export async function setupSignaling(io) {
   });
 }
 
+function hasOtherVoiceSocketForUser(userId, currentSocketId, channelId, activeSockets, io) {
+  if (!userId || !activeSockets || !channelId) return false;
+  for (const [sockId, actUser] of activeSockets.entries()) {
+    if (actUser && actUser.id === userId && sockId !== currentSocketId && actUser.activeVoiceChannel === channelId) {
+      const sock = io?.sockets?.sockets?.get(sockId);
+      if (sock && sock.connected) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function hasOtherConnectedSocketForUser(userId, currentSocketId, activeSockets, io) {
   if (!userId || !activeSockets) return false;
   for (const [sockId, actUser] of activeSockets.entries()) {
@@ -2016,6 +2047,7 @@ function cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, reason = ''
     }
 
     const cleanRoom = [];
+    const seenInThisRoom = new Set();
     for (const u of room) {
       if (!u || !u.id || !u.socketId) {
         changed = true;
@@ -2029,14 +2061,34 @@ function cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, reason = ''
         continue;
       }
 
-      // Single-room invariant: A user ID can exist in at most ONE voice channel
-      if (seenUserIds.has(u.id)) {
+      // Check duplicate in same room
+      if (seenInThisRoom.has(u.id)) {
         changed = true;
         continue;
       }
+      seenInThisRoom.add(u.id);
 
-      seenUserIds.set(u.id, { channelId, socketId: u.socketId });
-      cleanRoom.push(u);
+      // Single-room invariant: A user ID can exist in at most ONE voice channel across all channels
+      if (seenUserIds.has(u.id)) {
+        const existing = seenUserIds.get(u.id);
+        const actUser = activeSockets?.get(u.socketId);
+        // If activeSockets indicates this socket's activeVoiceChannel is channelId, prioritize it
+        if (actUser && actUser.activeVoiceChannel === channelId && existing.channelId !== channelId) {
+          const prevRoom = voiceRooms.get(existing.channelId) || [];
+          const filteredPrev = prevRoom.filter((item) => item.id !== u.id);
+          if (filteredPrev.length === 0) voiceRooms.delete(existing.channelId);
+          else voiceRooms.set(existing.channelId, filteredPrev);
+
+          seenUserIds.set(u.id, { channelId, socketId: u.socketId });
+          cleanRoom.push(u);
+        } else {
+          changed = true;
+          continue;
+        }
+      } else {
+        seenUserIds.set(u.id, { channelId, socketId: u.socketId });
+        cleanRoom.push(u);
+      }
     }
 
     if (cleanRoom.length === 0) {
@@ -2056,7 +2108,7 @@ function cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, reason = ''
           actUser.activeVoiceChannel = voiceInfo.channelId;
           changed = true;
         }
-      } else if (actUser.activeVoiceChannel) {
+      } else if (!voiceInfo && actUser.activeVoiceChannel) {
         actUser.activeVoiceChannel = null;
         changed = true;
       }
@@ -2070,25 +2122,30 @@ function leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets) {
   const socketId = socket?.id;
   const userId = user?.id;
 
-  for (const [channelId, room] of voiceRooms.entries()) {
-    const hasOtherSock = hasOtherConnectedSocketForUser(userId, socketId, activeSockets, io);
-    const hasMatch = room.some((u) => (socketId && u.socketId === socketId) || (userId && u.id === userId && !hasOtherSock));
-    if (hasMatch) {
-      const updated = room.filter((u) => {
-        if (socketId && u.socketId === socketId) return false;
-        if (userId && u.id === userId && !hasOtherSock) return false;
-        return true;
-      });
-      if (updated.length === 0) {
-        voiceRooms.delete(channelId);
-      } else {
-        voiceRooms.set(channelId, updated);
-      }
+  if (!userId && !socketId) return;
 
-      if (socket) {
-        socket.leave(`voice-${channelId}`);
-        socket.to(`voice-${channelId}`).emit('user-left-voice', {
-          socketId: socketId,
+  for (const [channelId, room] of Array.from(voiceRooms.entries())) {
+    const hasMatch = room.some((u) => (socketId && u.socketId === socketId) || (userId && u.id === userId));
+    if (hasMatch) {
+      const hasOtherVoiceSock = hasOtherVoiceSocketForUser(userId, socketId, channelId, activeSockets, io);
+      if (hasOtherVoiceSock) {
+        // Just remove this dead socketId, keep user in room with the other active socket
+        const updated = room.filter((u) => u.socketId !== socketId);
+        voiceRooms.set(channelId, updated);
+      } else {
+        // Remove user completely from this room
+        const updated = room.filter((u) => (socketId && u.socketId === socketId ? false : (userId && u.id === userId ? false : true)));
+        if (updated.length === 0) {
+          voiceRooms.delete(channelId);
+        } else {
+          voiceRooms.set(channelId, updated);
+        }
+
+        if (socket) {
+          socket.leave(`voice-${channelId}`);
+        }
+        io.to(`voice-${channelId}`).emit('user-left-voice', {
+          socketId: socketId || 'unknown',
           userId: userId || 'unknown',
           channelId
         });
@@ -2096,7 +2153,7 @@ function leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets) {
     }
   }
 
-  if (user && !hasOtherConnectedSocketForUser(user.id, socketId, activeSockets, io)) {
+  if (user && !hasOtherVoiceSocketForUser(user.id, socketId, user.activeVoiceChannel, activeSockets, io)) {
     user.activeVoiceChannel = null;
     user.isScreenSharing = false;
   }
