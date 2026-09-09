@@ -180,14 +180,29 @@ export function validateAttachments(attachments) {
       }
     }
 
+    const isImg = Boolean(att.isImage) ||
+      String(att.type || '').startsWith('image/') ||
+      String(att.dataUrl || '').startsWith('data:image') ||
+      /\.(jpg|jpeg|png|gif|webp|svg|bmp|ico|avif)(\?.*)?$/i.test(att.name || '');
+
+    const isVid = Boolean(att.isVideo) ||
+      String(att.type || '').startsWith('video/') ||
+      String(att.dataUrl || '').startsWith('data:video') ||
+      /\.(mp4|webm|mov|mkv|ogg|m4v)(\?.*)?$/i.test(att.name || '');
+
+    const isAud = Boolean(att.isAudio) ||
+      String(att.type || '').startsWith('audio/') ||
+      String(att.dataUrl || '').startsWith('data:audio') ||
+      /\.(mp3|wav|ogg|m4a|aac)(\?.*)?$/i.test(att.name || '');
+
     sanitized.push({
       name: String(att.name || 'arquivo').slice(0, 100),
       type: String(att.type || 'application/octet-stream').slice(0, 50),
       size: Number(att.size) || 0,
       dataUrl: att.dataUrl || null,
-      isImage: Boolean(att.isImage),
-      isVideo: Boolean(att.isVideo),
-      isAudio: Boolean(att.isAudio)
+      isImage: isImg,
+      isVideo: isVid,
+      isAudio: isAud
     });
   }
 
