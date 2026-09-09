@@ -298,8 +298,8 @@ if (fs.existsSync(DIST_PATH)) {
   });
 }
 
-// Initialize Socket.io signaling & music bot
-setupSignaling(io);
+// Initialize Socket.io signaling & music bot & Admin REST API
+setupSignaling(io, app);
 
 const PORT = process.env.PORT || 4000;
 let isListening = false;

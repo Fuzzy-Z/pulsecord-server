@@ -115,6 +115,8 @@ export class StorageManager {
       }
     }
 
+    let verificationRequests = [];
+
     // Disk persistence fallback (ideal for standalone VM without Redis, keeps pinned photos/videos)
     if (fs.existsSync(DB_FILE)) {
       try {
@@ -129,7 +131,10 @@ export class StorageManager {
         if (diskDb.messageHistory && typeof diskDb.messageHistory === 'object') {
           messageHistory = new Map(Object.entries(diskDb.messageHistory));
         }
-        console.log(`[Storage] Loaded data from local disk database (${users.length} users, ${servers.length} servers, ${messageHistory.size} channels)`);
+        if (diskDb.verificationRequests && Array.isArray(diskDb.verificationRequests)) {
+          verificationRequests = diskDb.verificationRequests;
+        }
+        console.log(`[Storage] Loaded data from local disk database (${users.length} users, ${servers.length} servers, ${messageHistory.size} channels, ${verificationRequests.length} verifications)`);
       } catch (err) {
         console.error('[Storage] Error reading local disk database.json:', err.message);
       }
@@ -138,11 +143,12 @@ export class StorageManager {
     return {
       users,
       servers,
-      messageHistory
+      messageHistory,
+      verificationRequests
     };
   }
 
-  async saveData(users, servers, messageHistoryMap) {
+  async saveData(users, servers, messageHistoryMap, verificationRequests = []) {
     const historyObj = Object.fromEntries(messageHistoryMap);
 
     // Cryptographically protect stored passwords using native scrypt
@@ -169,6 +175,7 @@ export class StorageManager {
         users: safeUsers,
         servers,
         messageHistory: historyObj,
+        verificationRequests,
         updatedAt: new Date().toISOString()
       });
       fs.writeFileSync(DB_FILE, dataPayload, 'utf-8');

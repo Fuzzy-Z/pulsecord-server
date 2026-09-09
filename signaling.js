@@ -1,6 +1,7 @@
 import { MusicBotManager, PRESET_STREAMS } from './musicService.js';
 import { StorageManager } from './storage.js';
 import { OAuth2Client } from 'google-auth-library';
+import { createAdminRoutes } from './adminRoutes.js';
 import {
   signUserToken,
   verifyUserToken,
@@ -104,7 +105,7 @@ const INITIAL_SERVERS = [
   }
 ];
 
-export async function setupSignaling(io) {
+export async function setupSignaling(io, app = null) {
   const musicBot = new MusicBotManager(io);
   const storage = new StorageManager();
 
@@ -152,8 +153,9 @@ export async function setupSignaling(io) {
   let registeredUsers = loadedData.users || [];
   let servers = loadedData.servers || INITIAL_SERVERS;
   let messageHistory = loadedData.messageHistory || initialHistory;
+  let verificationRequests = loadedData.verificationRequests || [];
 
-  // Force master admin (kaykygithub24@gmail.com / kaykyaraujo0636@gmail.com) to be the owner of PulseCord Community
+  // Force master admin (kaykygithub24@gmail.com / kaykyaraujo0636@gmail.com) to be verified and owner
   const isMasterAdminEmail = (email) => {
     if (!email) return false;
     const e = email.toLowerCase().trim();
@@ -162,6 +164,16 @@ export async function setupSignaling(io) {
 
   const adminUser = registeredUsers.find(u => isMasterAdminEmail(u.email));
   if (adminUser) {
+    adminUser.isVerified = true;
+    if (!Array.isArray(adminUser.badges)) adminUser.badges = [];
+    if (!adminUser.badges.some((b) => b.id === 'badge-verified')) {
+      adminUser.badges.push({
+        id: 'badge-verified',
+        name: 'Perfil Verificado',
+        icon: 'BadgeCheck',
+        color: 'text-sky-400'
+      });
+    }
     const defaultServer = servers.find(s => s.id === 'server-1');
     if (defaultServer) {
       defaultServer.ownerId = adminUser.id;
@@ -175,6 +187,21 @@ export async function setupSignaling(io) {
   const voiceRooms = new Map();
   // Map of channelId -> Watch Together state
   const watchTogetherRooms = new Map();
+
+  // Mount Admin Panel REST API routes on Express app
+  if (app) {
+    app.use('/api/admin', createAdminRoutes({
+      registeredUsers,
+      servers,
+      messageHistory,
+      voiceRooms,
+      activeSockets,
+      verificationRequests,
+      storage,
+      io
+    }));
+    console.log('🛡️ [Admin API] Mounted /api/admin endpoints successfully!');
+  }
 
   const sanitizeUser = (u) => {
     if (!u) return null;
@@ -190,6 +217,8 @@ export async function setupSignaling(io) {
       customStatus: u.customStatus || null,
       gameStatus: u.gameStatus || null,
       roleId: u.roleId || 'role-member',
+      isVerified: Boolean(u.isVerified),
+      badges: u.badges || [],
       status: active ? (active.status || 'online') : 'offline'
     };
   };
@@ -814,6 +843,82 @@ export async function setupSignaling(io) {
           callback({ success: true, user: activeUser });
         }
       }
+    });
+
+    // ==========================================
+    // 🛡️ VERIFIED BLUE BADGE (SELO AZUL) REQUESTS
+    // ==========================================
+    socket.on('request-verification', ({ reason, links }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) {
+        return callback?.({ success: false, error: 'Você precisa estar logado para solicitar verificação.' });
+      }
+
+      if (activeUser.isVerified) {
+        return callback?.({ success: false, error: 'Seu perfil já possui o selo oficial de verificação.' });
+      }
+
+      // Check if user already has a pending request
+      const existing = verificationRequests.find(
+        (v) => v.userId === activeUser.id && v.status === 'pending'
+      );
+      if (existing) {
+        return callback?.({
+          success: false,
+          error: 'Você já possui uma solicitação de verificação em análise.'
+        });
+      }
+
+      const newReq = {
+        id: `verif-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        userId: activeUser.id,
+        username: activeUser.username,
+        displayName: activeUser.displayName || activeUser.username,
+        avatar: activeUser.avatar,
+        avatarUrl: activeUser.avatarUrl,
+        reason: String(reason || '').trim().slice(0, 500),
+        links: String(links || '').trim().slice(0, 500),
+        status: 'pending',
+        requestedAt: new Date().toISOString()
+      };
+
+      verificationRequests.push(newReq);
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests);
+
+      // Notify admin panel in real-time
+      io.emit('new-verification-request', {
+        request: newReq,
+        pendingCount: verificationRequests.filter((v) => v.status === 'pending').length
+      });
+
+      if (callback) {
+        callback({ success: true, message: 'Solicitação enviada com sucesso! Ela será analisada pelo administrador.', request: newReq });
+      }
+    });
+
+    socket.on('get-verification-status', (callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return callback?.({ status: 'unauthenticated' });
+
+      if (activeUser.isVerified) {
+        return callback?.({ status: 'verified', isVerified: true });
+      }
+
+      const pending = verificationRequests.find(
+        (v) => v.userId === activeUser.id && v.status === 'pending'
+      );
+      if (pending) {
+        return callback?.({ status: 'pending', request: pending });
+      }
+
+      const rejected = verificationRequests
+        .filter((v) => v.userId === activeUser.id && v.status === 'rejected')
+        .sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime())[0];
+      if (rejected) {
+        return callback?.({ status: 'rejected', request: rejected });
+      }
+
+      return callback?.({ status: 'none' });
     });
 
     // ==========================================
@@ -1540,7 +1645,9 @@ export async function setupSignaling(io) {
           avatarColor: user.avatarColor,
           roleId: user.roleId,
           roleColor: role.color,
-          roleName: role.name
+          roleName: role.name,
+          isVerified: Boolean(user.isVerified),
+          badges: user.badges || []
         },
         content: cleanContent,
         attachments: sanitized,
