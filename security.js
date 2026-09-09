@@ -87,9 +87,8 @@ export function verifyUserToken(token) {
  */
 export async function hashPassword(plainPassword) {
   if (!plainPassword) return '';
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derivedKey = crypto.scryptSync(plainPassword, salt, 64);
-  return `scrypt$${salt}$${derivedKey.toString('hex')}`;
+  const bcrypt = await import('bcryptjs');
+  return bcrypt.hashSync(plainPassword, 10);
 }
 
 /**

@@ -25,26 +25,6 @@ export class StorageManager {
       console.error('[Storage] Error ensuring data directory exists:', err.message);
     }
 
-    // 1. Check Upstash REST credentials (UPSTASH_REDIS_REST_URL & UPSTASH_REDIS_REST_TOKEN)
-    const upstashUrl = process.env.UPSTASH_REDIS_REST_URL;
-    const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (upstashUrl && upstashToken) {
-      try {
-        console.log('[Storage] Connecting to Upstash Redis REST...');
-        const { Redis } = await import('@upstash/redis');
-        this.upstashClient = new Redis({
-          url: upstashUrl,
-          token: upstashToken
-        });
-        await this.upstashClient.ping();
-        this.useRedis = true;
-        console.log('[Storage] Connected to Upstash Redis via REST successfully!');
-        return;
-      } catch (e) {
-        console.error('[Storage] Upstash REST connection failed:', e.message);
-      }
-    }
-
     // 2. Check standard REDIS_URL (e.g. rediss://...)
     const redisUrl = process.env.REDIS_URL;
     if (redisUrl) {
@@ -72,29 +52,6 @@ export class StorageManager {
     let users = [];
     let servers = defaultServers;
     let messageHistory = defaultHistory;
-
-    // First try Redis if configured
-    if (this.upstashClient) {
-      try {
-        const rawUsers = await this.upstashClient.get('pulsecord:users');
-        const rawServers = await this.upstashClient.get('pulsecord:servers');
-        const rawHistory = await this.upstashClient.get('pulsecord:history');
-
-        if (rawUsers) users = typeof rawUsers === 'string' ? JSON.parse(rawUsers) : rawUsers;
-        if (rawServers && (Array.isArray(rawServers) ? rawServers.length > 0 : Object.keys(rawServers).length > 0)) {
-          servers = typeof rawServers === 'string' ? JSON.parse(rawServers) : rawServers;
-        }
-        if (rawHistory) {
-          const histObj = typeof rawHistory === 'string' ? JSON.parse(rawHistory) : rawHistory;
-          messageHistory = new Map(Object.entries(histObj));
-        }
-
-        console.log(`[Storage] Loaded data from Upstash Redis (${users.length} users, ${servers.length} servers)`);
-        return { users, servers, messageHistory };
-      } catch (err) {
-        console.error('[Storage] Error loading from Upstash Redis:', err.message);
-      }
-    }
 
     if (this.useRedis && this.redisClient) {
       try {
@@ -150,15 +107,14 @@ export class StorageManager {
 
   async saveData(users, servers, messageHistoryMap, verificationRequests = []) {
     const historyObj = Object.fromEntries(messageHistoryMap);
+    const bcrypt = await import('bcryptjs');
 
-    // Cryptographically protect stored passwords using native scrypt
+    // Cryptographically protect stored passwords using native bcrypt
     const safeUsers = (users || []).map((u) => {
       const copy = { ...u };
       if (copy.password && typeof copy.password === 'string' && !copy.password.startsWith('$2') && !copy.password.startsWith('scrypt$')) {
         try {
-          const salt = crypto.randomBytes(16).toString('hex');
-          const derivedKey = crypto.scryptSync(copy.password, salt, 64);
-          copy.password = `scrypt$${salt}$${derivedKey.toString('hex')}`;
+          copy.password = bcrypt.hashSync(copy.password, 10);
         } catch (e) {
           console.error('[Storage] Error hashing password for user:', copy.id, e.message);
         }
@@ -181,17 +137,6 @@ export class StorageManager {
       fs.writeFileSync(DB_FILE, dataPayload, 'utf-8');
     } catch (err) {
       console.error('[Storage] Failed to persist data to local disk:', err.message);
-    }
-
-    // 2. Also replicate to Redis if available
-    if (this.upstashClient) {
-      try {
-        await this.upstashClient.set('pulsecord:users', safeUsers);
-        await this.upstashClient.set('pulsecord:servers', servers);
-        await this.upstashClient.set('pulsecord:history', historyObj);
-      } catch (err) {
-        console.error('[Storage] Failed saving to Upstash Redis:', err.message);
-      }
     }
 
     if (this.useRedis && this.redisClient) {
