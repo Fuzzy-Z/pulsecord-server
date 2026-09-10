@@ -79,7 +79,8 @@ app.get('/api/ice-servers', (req, res) => {
           'stun:stun2.l.google.com:19302',
           'stun:stun3.l.google.com:19302',
           'stun:stun4.l.google.com:19302',
-          'stun:stun.cloudflare.com:3478'
+          'stun:stun.cloudflare.com:3478',
+          `stun:${coturnHost}:${coturnPort}`
         ]
       },
       {
@@ -89,18 +90,8 @@ app.get('/api/ice-servers', (req, res) => {
         ],
         username: coturnUser,
         credential: coturnPass
-      },
-      {
-        urls: [
-          'turn:openrelay.metered.ca:80',
-          'turn:openrelay.metered.ca:443',
-          'turn:openrelay.metered.ca:443?transport=tcp'
-        ],
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
       }
-    ],
-    iceCandidatePoolSize: 10
+    ]
   });
 });
 
