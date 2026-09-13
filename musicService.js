@@ -40,6 +40,186 @@ function getCookieArgs() {
   return [];
 }
 
+export function isYouTubeUrl(str) {
+  if (!str || typeof str !== 'string') return false;
+  const s = str.trim().toLowerCase();
+  return (
+    s.includes('youtube.com/') ||
+    s.includes('youtu.be/') ||
+    s.includes('music.youtube.com/')
+  );
+}
+
+export function extractYouTubeVideoId(urlStr) {
+  if (!urlStr) return null;
+  const s = urlStr.trim();
+  const uStr = s.startsWith('http') ? s : `https://${s}`;
+  try {
+    const u = new URL(uStr);
+    if (u.hostname === 'youtu.be') {
+      const vid = u.pathname.replace(/^\/+/, '').split('/')[0].split('?')[0];
+      if (vid && vid.length >= 8) return vid;
+    }
+    const v = u.searchParams.get('v');
+    if (v) return v;
+    const match = u.pathname.match(/\/(?:embed|v|shorts)\/([a-zA-Z0-9_-]{11})/);
+    if (match) return match[1];
+  } catch (e) {}
+  const fallback = s.match(/(?:youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([a-zA-Z0-9_-]{11})/);
+  return fallback ? fallback[1] : null;
+}
+
+export async function fetchYouTubeOEmbed(urlStr) {
+  try {
+    const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(urlStr)}&format=json`, {
+      signal: AbortSignal.timeout(4000)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        title: data.title,
+        artist: data.author_name || 'YouTube',
+        cover: data.thumbnail_url
+      };
+    }
+  } catch (e) {}
+  return null;
+}
+
+export async function extractPlaylistFromHtml(urlStr, limit = 25) {
+  try {
+    const res = await fetch(urlStr, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+      },
+      signal: AbortSignal.timeout(6000)
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const start = html.indexOf('var ytInitialData = ');
+    if (start === -1) return [];
+    const end = html.indexOf(';</script>', start);
+    if (end === -1) return [];
+    const data = JSON.parse(html.slice(start + 20, end));
+
+    const tracks = [];
+    const seenIds = new Set();
+
+    function findVideos(obj) {
+      if (!obj || typeof obj !== 'object' || tracks.length >= limit) return;
+      if (obj.playlistPanelVideoRenderer) {
+        const item = obj.playlistPanelVideoRenderer;
+        const vid = item.videoId;
+        if (vid && !seenIds.has(vid)) {
+          seenIds.add(vid);
+          const title = item.title?.simpleText || item.title?.runs?.[0]?.text || 'YouTube Track';
+          const artist = item.longBylineText?.runs?.[0]?.text || item.shortBylineText?.runs?.[0]?.text || 'YouTube';
+          const thumb = item.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+          const vUrl = `https://www.youtube.com/watch?v=${vid}`;
+          tracks.push({
+            id: 'yt-' + vid,
+            title,
+            artist,
+            url: vUrl,
+            youtubeUrl: vUrl,
+            originalUrl: vUrl,
+            cover: thumb,
+            duration: 0,
+            source: 'youtube'
+          });
+        }
+      }
+      if (obj.playlistVideoRenderer) {
+        const item = obj.playlistVideoRenderer;
+        const vid = item.videoId;
+        if (vid && !seenIds.has(vid)) {
+          seenIds.add(vid);
+          const title = item.title?.runs?.[0]?.text || item.title?.simpleText || 'YouTube Track';
+          const artist = item.shortBylineText?.runs?.[0]?.text || 'YouTube';
+          const thumb = item.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+          const vUrl = `https://www.youtube.com/watch?v=${vid}`;
+          tracks.push({
+            id: 'yt-' + vid,
+            title,
+            artist,
+            url: vUrl,
+            youtubeUrl: vUrl,
+            originalUrl: vUrl,
+            cover: thumb,
+            duration: 0,
+            source: 'youtube'
+          });
+        }
+      }
+      for (const k of Object.keys(obj)) {
+        findVideos(obj[k]);
+      }
+    }
+
+    findVideos(data);
+    return tracks;
+  } catch (e) {
+    return [];
+  }
+}
+
+export async function searchYouTubeScrape(query, limit = 8) {
+  try {
+    const res = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const start = html.indexOf('var ytInitialData = ');
+    if (start === -1) return [];
+    const end = html.indexOf(';</script>', start);
+    if (end === -1) return [];
+    const data = JSON.parse(html.slice(start + 20, end));
+
+    const tracks = [];
+    const seenIds = new Set();
+
+    function findVideos(obj) {
+      if (!obj || typeof obj !== 'object' || tracks.length >= limit) return;
+      if (obj.videoRenderer) {
+        const item = obj.videoRenderer;
+        const vid = item.videoId;
+        if (vid && !seenIds.has(vid)) {
+          seenIds.add(vid);
+          const title = item.title?.runs?.[0]?.text || item.title?.simpleText || 'YouTube Track';
+          const artist = item.ownerText?.runs?.[0]?.text || item.shortBylineText?.runs?.[0]?.text || 'YouTube';
+          const thumb = item.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+          const vUrl = `https://www.youtube.com/watch?v=${vid}`;
+          tracks.push({
+            id: 'yt-' + vid,
+            title,
+            artist,
+            url: vUrl,
+            youtubeUrl: vUrl,
+            originalUrl: vUrl,
+            cover: thumb,
+            duration: 0,
+            source: 'youtube'
+          });
+        }
+      }
+      for (const k of Object.keys(obj)) {
+        findVideos(obj[k]);
+      }
+    }
+
+    findVideos(data);
+    return tracks;
+  } catch (e) {
+    return [];
+  }
+}
+
 export function resolveYtDlp(queryOrUrl) {
   return new Promise((resolve, reject) => {
     const bin = getYtDlpBin();
@@ -87,7 +267,16 @@ export function resolveYtDlp(queryOrUrl) {
   });
 }
 
-export function extractPlaylistItems(playlistUrl, limit = 25) {
+export async function extractPlaylistItems(playlistUrl, limit = 25) {
+  // 1. Fast HTML scraping for YouTube Mixes & Playlists (zero binary dependency, instantaneous)
+  try {
+    const htmlTracks = await extractPlaylistFromHtml(playlistUrl, limit);
+    if (htmlTracks && htmlTracks.length > 0) {
+      return htmlTracks;
+    }
+  } catch (e) {}
+
+  // 2. Fallback to yt-dlp binary if available
   return new Promise((resolve) => {
     const bin = getYtDlpBin();
     const cookieArgs = getCookieArgs();
@@ -630,16 +819,49 @@ class MusicBotManager {
       } catch (err) {
         console.warn('[MusicBot] Deezer parse error:', err.message);
       }
-    } else if (qHostname === 'www.youtube.com' || qHostname === 'youtube.com' || qHostname === 'youtu.be') {
+    } else if (isYouTubeUrl(q)) {
       sourcePlatform = 'youtube';
+      const videoId = extractYouTubeVideoId(q);
+      const cleanUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : (q.startsWith('http') ? q : `https://${q}`);
+
+      // Try fast oEmbed first for guaranteed real title, artist, thumbnail
+      let oembed = null;
       try {
-        const ytTrack = await resolveYtDlp(q);
+        oembed = await fetchYouTubeOEmbed(cleanUrl);
+      } catch (e) {}
+
+      // Optional: try yt-dlp with a fast timeout (5s) to see if direct stream is available
+      try {
+        const ytTrack = await Promise.race([
+          resolveYtDlp(q),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
+        ]);
         if (ytTrack && ytTrack.url) {
-          return ytTrack;
+          return {
+            ...ytTrack,
+            title: oembed?.title || ytTrack.title,
+            artist: oembed?.artist || ytTrack.artist,
+            cover: oembed?.cover || ytTrack.cover,
+            youtubeUrl: q.startsWith('http') ? q : `https://${q}`,
+            source: 'youtube'
+          };
         }
       } catch (err) {
-        console.warn('[MusicBot] yt-dlp direct url resolution error:', err.message);
+        console.warn('[MusicBot] yt-dlp direct url resolution skipped for YouTube URL:', err.message);
       }
+
+      // GUARANTEED RETURN: Never fall back to preset radio for YouTube URLs!
+      return {
+        id: 'yt-' + (videoId || Date.now()),
+        title: oembed?.title || originalTitle || 'Vídeo do YouTube',
+        artist: oembed?.artist || originalArtist || 'YouTube',
+        url: cleanUrl,
+        youtubeUrl: q.startsWith('http') ? q : `https://${q}`,
+        originalUrl: q,
+        cover: oembed?.cover || (videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop'),
+        duration: 0,
+        source: 'youtube'
+      };
     } else if (!q.startsWith('http://') && !q.startsWith('https://')) {
       // Plain text search: extract Artist and Title if separated by hyphen
       if (q.includes(' - ')) {
@@ -663,6 +885,27 @@ class MusicBotManager {
       }
     } catch (err) {
       console.warn('[MusicBot] yt-dlp search stream skipped (likely IP block / unsupported env):', err.message);
+    }
+
+    // Provider A2: Direct YouTube HTML Search Scraper (Fast, works without yt-dlp)
+    try {
+      const ytScraped = await searchYouTubeScrape(searchTitle, 3);
+      if (ytScraped && ytScraped.length > 0) {
+        const best = ytScraped[0];
+        return {
+          id: 'yt-' + best.id,
+          title: originalTitle || best.title,
+          artist: originalArtist || best.artist,
+          url: best.url,
+          youtubeUrl: best.youtubeUrl,
+          originalUrl: best.originalUrl,
+          cover: fallbackCover || best.cover,
+          duration: 0,
+          source: sourcePlatform !== 'search' ? sourcePlatform : 'youtube'
+        };
+      }
+    } catch (err) {
+      console.warn('[MusicBot] YouTube search scrape error:', err.message);
     }
 
     // 4. Audio Streaming Resolution - Provider B: SoundCloud with Candidate Scoring
@@ -793,7 +1036,22 @@ class MusicBotManager {
     const lowerQ = searchTitle.toLowerCase();
     const userWantsRemix = /sped\s*up|speed\s*up|slowed|pitch|remix|nightcore|cover|mashup|edit/i.test(lowerQ);
 
-    // 1. YouTube Search with yt-dlp
+    // 1. YouTube Search with Direct HTML Scraper (instant, zero binary needed)
+    try {
+      const scraped = await searchYouTubeScrape(searchTitle, 8);
+      if (scraped && scraped.length > 0) {
+        let cleanScraped = scraped;
+        if (!userWantsRemix) {
+          const filtered = scraped.filter((t) => !/sped\s*up|speed\s*up|slowed|nightcore|mashup/i.test(t.title || ''));
+          if (filtered.length > 0) cleanScraped = filtered;
+        }
+        return cleanScraped;
+      }
+    } catch (err) {
+      console.warn('[MusicBot] YouTube HTML search scrape skipped:', err.message);
+    }
+
+    // 1b. YouTube Search with yt-dlp fallback
     try {
       const ytResults = await searchYtDlp(searchTitle, 8);
       if (ytResults && ytResults.length > 0) {
