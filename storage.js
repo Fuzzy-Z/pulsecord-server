@@ -193,7 +193,6 @@ export class StorageManager {
           await this.prisma.user.upsert({
             where: { id: u.id },
             update: {
-              status: u.status,
               customStatus: typeof u.customStatus === 'object' ? JSON.stringify(u.customStatus) : (u.customStatus || null),
               gameStatus: u.gameStatus || null,
               isVerified: u.isVerified || false

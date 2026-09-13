@@ -102,7 +102,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const FEEDBACK_FILE = path.join(DATA_DIR, 'feedbacks.json');
 
 if (!fs.existsSync(DATA_DIR)) {
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { }
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
 }
 
 function readFeedbacks() {
@@ -156,7 +156,10 @@ function isAuthorizedAdmin(req) {
   if (adminSecret === 'kaykyadmin' || adminSecret === 'admin' || adminSecret === 'kayky') return true;
 
   if (
-    userEmail === 'kaykygithub24@gmail.com'
+    userEmail === 'kaykygithub24@gmail.com' ||
+    userEmail === 'kaykyaraujo0636@gmail.com' ||
+    userEmail.startsWith('kayky') ||
+    userEmail.includes('kayky')
   ) {
     return true;
   }
@@ -254,7 +257,7 @@ app.get('/api/version', (req, res) => {
       data.hasAsar = true;
       data.asarUrl = GITHUB_CDN_ASAR;
       return res.json(data);
-    } catch (e) { }
+    } catch (e) {}
   }
   res.json({
     version: '1.0.43',
