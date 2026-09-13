@@ -44,10 +44,13 @@ export function resolveYtDlp(queryOrUrl) {
   return new Promise((resolve, reject) => {
     const bin = getYtDlpBin();
     const isUrl = queryOrUrl.startsWith('http://') || queryOrUrl.startsWith('https://');
-    const arg = isUrl ? queryOrUrl : `ytsearch1:${queryOrUrl}`;
+    let arg = queryOrUrl;
+    if (!isUrl) {
+      arg = `ytsearch1:${queryOrUrl}`;
+    }
     const cookieArgs = getCookieArgs();
 
-    execFile(bin, ['-j', '-f', 'bestaudio/best', '--no-warnings', ...cookieArgs, arg], { timeout: 18000 }, (err, stdout) => {
+    execFile(bin, ['-j', '--no-playlist', '-f', 'bestaudio/best', '--no-warnings', ...cookieArgs, arg], { timeout: 15000 }, (err, stdout) => {
       if (err) return reject(err);
       try {
         const line = stdout.trim().split('\n')[0];
@@ -59,19 +62,20 @@ export function resolveYtDlp(queryOrUrl) {
           if (af) audioUrl = af.url;
         }
 
-        if (!audioUrl) return reject(new Error('Could not extract direct stream URL'));
+        const ytUrl = data.webpage_url || data.original_url || (data.id ? `https://www.youtube.com/watch?v=${data.id}` : queryOrUrl);
 
-        const proxyUrl = (audioUrl.includes('googlevideo.com') || audioUrl.includes('youtube.com'))
+        const proxyUrl = (audioUrl && (audioUrl.includes('googlevideo.com') || audioUrl.includes('youtube.com')))
           ? `/api/music/proxy?url=${encodeURIComponent(audioUrl)}`
-          : audioUrl;
+          : (audioUrl || ytUrl);
 
         resolve({
           id: 'yt-' + (data.id || Date.now()),
           title: data.fulltitle || data.title,
           artist: data.uploader || data.channel || 'YouTube',
           url: proxyUrl,
+          youtubeUrl: isUrl && queryOrUrl.includes('list=') ? queryOrUrl : ytUrl,
           directStreamUrl: audioUrl,
-          originalUrl: data.webpage_url || data.original_url || queryOrUrl,
+          originalUrl: isUrl ? queryOrUrl : ytUrl,
           cover: data.thumbnail || (data.thumbnails && data.thumbnails.length > 0 ? data.thumbnails[data.thumbnails.length - 1].url : ''),
           duration: data.duration || 0,
           source: 'youtube'
@@ -80,6 +84,48 @@ export function resolveYtDlp(queryOrUrl) {
         reject(e);
       }
     });
+  });
+}
+
+export function extractPlaylistItems(playlistUrl, limit = 25) {
+  return new Promise((resolve) => {
+    const bin = getYtDlpBin();
+    const cookieArgs = getCookieArgs();
+    execFile(
+      bin,
+      ['-j', '--flat-playlist', '--playlist-end', String(limit), '--no-warnings', ...cookieArgs, playlistUrl],
+      { timeout: 15000 },
+      (err, stdout) => {
+        if (err || !stdout) return resolve([]);
+        try {
+          const lines = stdout.trim().split('\n').filter(Boolean);
+          const tracks = [];
+          for (const line of lines) {
+            try {
+              const data = JSON.parse(line);
+              const thumb = data.thumbnails && data.thumbnails.length > 0
+                ? data.thumbnails[data.thumbnails.length - 1].url
+                : (data.thumbnail || '');
+              const videoUrl = data.url || `https://www.youtube.com/watch?v=${data.id}`;
+              tracks.push({
+                id: 'yt-' + (data.id || Date.now() + '-' + Math.random().toString(36).substr(2, 5)),
+                title: data.title,
+                artist: data.uploader || data.channel || 'YouTube',
+                url: videoUrl,
+                youtubeUrl: videoUrl,
+                originalUrl: videoUrl,
+                cover: thumb || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop',
+                duration: data.duration || 0,
+                source: 'youtube'
+              });
+            } catch (e) {}
+          }
+          resolve(tracks);
+        } catch (e) {
+          resolve([]);
+        }
+      }
+    );
   });
 }
 
@@ -818,6 +864,7 @@ class MusicBotManager {
 
   async play(channelId, query, user) {
     const player = this.getPlayer(channelId);
+    const isPlaylist = typeof query === 'string' && (query.includes('list=') || query.includes('playlist?list='));
     const track = await this.resolveMetadata(query);
     track.requestedBy = user ? user.username : 'User';
 
@@ -831,6 +878,29 @@ class MusicBotManager {
     }
 
     this.broadcastState(channelId);
+
+    // If a YouTube playlist or Mix was provided, asynchronously queue the rest of the mix
+    if (isPlaylist) {
+      extractPlaylistItems(query, 25).then((items) => {
+        if (items && items.length > 1) {
+          const currentId = track.id?.replace('yt-', '');
+          const additional = items
+            .filter((t) => !currentId || !t.id.includes(currentId))
+            .map((t) => ({
+              ...t,
+              requestedBy: user ? user.username : 'Playlist Mix'
+            }));
+          if (additional.length > 0) {
+            player.queue.push(...additional);
+            this.broadcastState(channelId);
+            console.log(`[MusicBot] Queued ${additional.length} tracks from playlist/mix into channel ${channelId}`);
+          }
+        }
+      }).catch((err) => {
+        console.warn('[MusicBot] Playlist extraction error:', err.message);
+      });
+    }
+
     return {
       status: player.currentTrack === track ? 'playing' : 'queued',
       track,
