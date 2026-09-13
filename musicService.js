@@ -509,6 +509,60 @@ export async function parseSpotifyUrl(url) {
   }
 }
 
+export async function extractSpotifyPlaylist(urlStr, limit = 50) {
+  try {
+    const cleanUrl = (urlStr || '').trim().split('?')[0];
+    const match = cleanUrl.match(/open\.spotify\.com\/(playlist|album)\/([a-zA-Z0-9]+)/);
+    if (!match) return null;
+    const type = match[1];
+    const id = match[2];
+    const embedUrl = `https://open.spotify.com/embed/${type}/${id}`;
+
+    const res = await fetch(embedUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+      },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const nextMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]+?)<\/script>/);
+    if (!nextMatch) return null;
+
+    const data = JSON.parse(nextMatch[1]);
+    const entity = data.props?.pageProps?.state?.data?.entity;
+    if (!entity) return null;
+
+    const playlistTitle = entity.name || entity.title || 'Spotify Playlist';
+    const playlistCover = entity.coverArt?.sources?.[0]?.url || '';
+    const trackList = entity.trackList || [];
+
+    const tracks = trackList.slice(0, limit).map((t, index) => {
+      const title = t.title || 'Música Desconhecida';
+      const artist = t.subtitle || (t.artists && Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : 'Spotify');
+      return {
+        id: 'sp-' + (t.uid || t.uri?.replace('spotify:track:', '') || `${Date.now()}-${index}`),
+        title,
+        artist,
+        query: `${artist} - ${title}`,
+        cover: playlistCover,
+        duration: Math.round((t.duration || 0) / 1000),
+        source: 'spotify'
+      };
+    });
+
+    return {
+      title: playlistTitle,
+      cover: playlistCover,
+      tracks
+    };
+  } catch (err) {
+    console.warn('[MusicBot] extractSpotifyPlaylist error:', err.message);
+    return null;
+  }
+}
+
 export async function parseAppleMusicUrl(url) {
   try {
     const cleanUrl = (url || '').trim().split('?')[0];
@@ -1016,6 +1070,16 @@ class MusicBotManager {
     if (!query || !query.trim()) return [];
     const q = query.trim();
 
+    // If it's a Spotify playlist or album, return its tracks
+    if (q.includes('open.spotify.com/playlist/') || q.includes('open.spotify.com/album/')) {
+      try {
+        const spData = await extractSpotifyPlaylist(q, 15);
+        if (spData && spData.tracks && spData.tracks.length > 0) {
+          return spData.tracks;
+        }
+      } catch (e) {}
+    }
+
     // If query is already a URL from supported platforms, resolve it directly into 1 track
     if (
       q.includes('open.spotify.com/') ||
@@ -1122,6 +1186,50 @@ class MusicBotManager {
 
   async play(channelId, query, user) {
     const player = this.getPlayer(channelId);
+
+    // 1. Spotify Playlist / Album Support
+    const isSpotifyPlaylist = typeof query === 'string' && (
+      query.includes('open.spotify.com/playlist/') ||
+      query.includes('open.spotify.com/album/')
+    );
+
+    if (isSpotifyPlaylist) {
+      try {
+        const spData = await extractSpotifyPlaylist(query, 50);
+        if (spData && spData.tracks && spData.tracks.length > 0) {
+          const firstSp = spData.tracks[0];
+          const resolvedFirst = await this.resolveMetadata(firstSp.query || `${firstSp.artist} - ${firstSp.title}`);
+          resolvedFirst.requestedBy = user ? user.username : 'Spotify Playlist';
+          if (firstSp.cover) resolvedFirst.cover = firstSp.cover;
+
+          const rest = spData.tracks.slice(1).map((t) => ({
+            ...t,
+            requestedBy: user ? user.username : 'Spotify Playlist'
+          }));
+
+          if (!player.currentTrack || !player.isPlaying) {
+            player.currentTrack = resolvedFirst;
+            player.isPlaying = true;
+            player.startedAt = Date.now();
+            player.pausedAt = 0;
+            player.queue = rest;
+          } else {
+            player.queue.push(resolvedFirst, ...rest);
+          }
+          this.broadcastState(channelId);
+          console.log(`[MusicBot] Loaded Spotify playlist "${spData.title}" with ${spData.tracks.length} tracks into channel ${channelId}`);
+          return {
+            status: player.currentTrack === resolvedFirst ? 'playing' : 'queued',
+            track: resolvedFirst,
+            queuePosition: player.queue.length
+          };
+        }
+      } catch (err) {
+        console.warn('[MusicBot] Spotify playlist resolution error:', err.message);
+      }
+    }
+
+    // 2. YouTube Pure Playlist Support (e.g. playlist?list=...)
     const isPlaylist = typeof query === 'string' && (query.includes('list=') || query.includes('playlist?list='));
     const isPurePlaylist = isPlaylist && !query.includes('v=') && !query.includes('youtu.be/');
 
@@ -1157,6 +1265,7 @@ class MusicBotManager {
       }
     }
 
+    // 3. Single track or YouTube Mix
     const track = await this.resolveMetadata(query);
     track.requestedBy = user ? user.username : 'User';
 
@@ -1193,6 +1302,8 @@ class MusicBotManager {
       });
     }
 
+    this.preResolveNext(channelId);
+
     return {
       status: player.currentTrack === track ? 'playing' : 'queued',
       track,
@@ -1221,15 +1332,55 @@ class MusicBotManager {
   skip(channelId) {
     const player = this.getPlayer(channelId);
     if (player.queue.length > 0) {
-      player.currentTrack = player.queue.shift();
+      const nextTrack = player.queue.shift();
+      player.currentTrack = nextTrack;
       player.isPlaying = true;
       player.startedAt = Date.now();
+      this.broadcastState(channelId);
+
+      // If it's an unresolved Spotify track, resolve its stream in background and broadcast!
+      if ((!nextTrack.url && !nextTrack.youtubeUrl) || nextTrack.source === 'spotify') {
+        this.resolveMetadata(nextTrack.query || `${nextTrack.artist} - ${nextTrack.title}`).then((resolved) => {
+          if (resolved && player.currentTrack === nextTrack) {
+            player.currentTrack = {
+              ...nextTrack,
+              ...resolved,
+              title: nextTrack.title || resolved.title,
+              artist: nextTrack.artist || resolved.artist,
+              cover: nextTrack.cover || resolved.cover
+            };
+            this.broadcastState(channelId);
+          }
+        }).catch((e) => {
+          console.warn('[MusicBot] Async skip resolve error:', e.message);
+        });
+      }
+
+      this.preResolveNext(channelId);
     } else {
       player.currentTrack = null;
       player.isPlaying = false;
+      this.broadcastState(channelId);
     }
-    this.broadcastState(channelId);
     return player;
+  }
+
+  preResolveNext(channelId) {
+    const player = this.getPlayer(channelId);
+    if (player.queue.length > 0) {
+      const next = player.queue[0];
+      if ((!next.url && !next.youtubeUrl) || next.source === 'spotify') {
+        this.resolveMetadata(next.query || `${next.artist} - ${next.title}`).then((resolved) => {
+          if (resolved && player.queue[0] === next) {
+            Object.assign(next, resolved, {
+              title: next.title || resolved.title,
+              artist: next.artist || resolved.artist,
+              cover: next.cover || resolved.cover
+            });
+          }
+        }).catch(() => {});
+      }
+    }
   }
 
   stop(channelId) {
