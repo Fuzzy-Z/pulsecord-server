@@ -333,14 +333,14 @@ app.get('/api/update/app.asar', (req, res) => {
 });
 
 // Official Windows Installer Setup direct download endpoint
-app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.98.exe', '/download/Voxel-Setup-1.0.101.exe'], (req, res) => {
+app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.98.exe', '/download/Voxel-Setup-1.0.101.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
   const localSetup = path.join(__dirname, 'Voxel-Setup.exe');
   if (fs.existsSync(localSetup)) {
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.101.exe"');
+    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.105.exe"');
     return res.sendFile(localSetup);
   }
-  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.101/Voxel-Setup-1.0.101.exe');
+  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.105/Voxel-Setup-1.0.105.exe');
 });
 
 // SPA fallback for web browser access
