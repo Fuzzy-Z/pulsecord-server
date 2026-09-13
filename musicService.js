@@ -842,7 +842,7 @@ class MusicBotManager {
             title: oembed?.title || ytTrack.title,
             artist: oembed?.artist || ytTrack.artist,
             cover: oembed?.cover || ytTrack.cover,
-            youtubeUrl: q.startsWith('http') ? q : `https://${q}`,
+            youtubeUrl: cleanUrl,
             source: 'youtube'
           };
         }
@@ -856,7 +856,7 @@ class MusicBotManager {
         title: oembed?.title || originalTitle || 'Vídeo do YouTube',
         artist: oembed?.artist || originalArtist || 'YouTube',
         url: cleanUrl,
-        youtubeUrl: q.startsWith('http') ? q : `https://${q}`,
+        youtubeUrl: cleanUrl,
         originalUrl: q,
         cover: oembed?.cover || (videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=300&h=300&fit=crop'),
         duration: 0,
@@ -1123,6 +1123,40 @@ class MusicBotManager {
   async play(channelId, query, user) {
     const player = this.getPlayer(channelId);
     const isPlaylist = typeof query === 'string' && (query.includes('list=') || query.includes('playlist?list='));
+    const isPurePlaylist = isPlaylist && !query.includes('v=') && !query.includes('youtu.be/');
+
+    if (isPurePlaylist) {
+      try {
+        const items = await extractPlaylistItems(query, 25);
+        if (items && items.length > 0) {
+          const first = items[0];
+          first.requestedBy = user ? user.username : 'Playlist';
+          const rest = items.slice(1).map((t) => ({
+            ...t,
+            requestedBy: user ? user.username : 'Playlist'
+          }));
+
+          if (!player.currentTrack || !player.isPlaying) {
+            player.currentTrack = first;
+            player.isPlaying = true;
+            player.startedAt = Date.now();
+            player.pausedAt = 0;
+            player.queue = rest;
+          } else {
+            player.queue.push(first, ...rest);
+          }
+          this.broadcastState(channelId);
+          return {
+            status: player.currentTrack === first ? 'playing' : 'queued',
+            track: first,
+            queuePosition: player.queue.length
+          };
+        }
+      } catch (err) {
+        console.warn('[MusicBot] Pure playlist resolution error:', err.message);
+      }
+    }
+
     const track = await this.resolveMetadata(query);
     track.requestedBy = user ? user.username : 'User';
 
