@@ -61,11 +61,16 @@ export function resolveYtDlp(queryOrUrl) {
 
         if (!audioUrl) return reject(new Error('Could not extract direct stream URL'));
 
+        const proxyUrl = (audioUrl.includes('googlevideo.com') || audioUrl.includes('youtube.com'))
+          ? `/api/music/proxy?url=${encodeURIComponent(audioUrl)}`
+          : audioUrl;
+
         resolve({
           id: 'yt-' + (data.id || Date.now()),
           title: data.fulltitle || data.title,
           artist: data.uploader || data.channel || 'YouTube',
-          url: audioUrl,
+          url: proxyUrl,
+          directStreamUrl: audioUrl,
           originalUrl: data.webpage_url || data.original_url || queryOrUrl,
           cover: data.thumbnail || (data.thumbnails && data.thumbnails.length > 0 ? data.thumbnails[data.thumbnails.length - 1].url : ''),
           duration: data.duration || 0,
@@ -508,6 +513,14 @@ class MusicBotManager {
       q.includes('icecast') ||
       q.includes('shoutcast')
     ) {
+      const presetMatch = PRESET_STREAMS.find((p) => p.url === q || p.id === q);
+      if (presetMatch) {
+        return {
+          ...presetMatch,
+          id: 'preset-' + Date.now(),
+          originalUrl: q
+        };
+      }
       const cleanName = q.split('/').pop().split('?')[0] || 'Áudio Stream';
       return {
         id: 'direct-' + Date.now(),
@@ -687,6 +700,8 @@ class MusicBotManager {
     const lower = q.toLowerCase();
     const match = PRESET_STREAMS.find(
       (stream) =>
+        stream.id === q ||
+        stream.url === q ||
         stream.keywords.some((k) => lower.includes(k)) ||
         stream.title.toLowerCase().includes(lower) ||
         stream.artist.toLowerCase().includes(lower)

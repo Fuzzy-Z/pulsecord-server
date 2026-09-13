@@ -63,6 +63,60 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Audio Stream Proxy for Voice Channel Music Bot (Bypasses CORS & IP restrictions on Googlevideo/YouTube)
+app.get('/api/music/proxy', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing url parameter');
+
+  try {
+    const range = req.headers.range;
+    const fetchHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*'
+    };
+    if (range) {
+      fetchHeaders['Range'] = range;
+    }
+
+    const controller = new AbortController();
+    req.on('close', () => controller.abort());
+
+    const upstream = await fetch(targetUrl, {
+      headers: fetchHeaders,
+      signal: controller.signal
+    });
+
+    res.status(upstream.status);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
+    const contentType = upstream.headers.get('content-type');
+    const contentLength = upstream.headers.get('content-length');
+    const contentRange = upstream.headers.get('content-range');
+    const acceptRanges = upstream.headers.get('accept-ranges');
+
+    if (contentType) res.setHeader('Content-Type', contentType);
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+
+    if (upstream.body) {
+      const { Readable } = await import('stream');
+      Readable.fromWeb(upstream.body).pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      console.error('[MusicProxy] Error streaming audio:', err.message);
+    }
+    if (!res.headersSent) {
+      res.status(500).send('Audio stream error');
+    }
+  }
+});
+
 // WebRTC ICE & TURN Servers configuration endpoint
 app.get('/api/ice-servers', (req, res) => {
   const coturnHost = process.env.COTURN_HOST || '150.230.73.46';
@@ -279,14 +333,14 @@ app.get('/api/update/app.asar', (req, res) => {
 });
 
 // Official Windows Installer Setup direct download endpoint
-app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.98.exe'], (req, res) => {
+app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.98.exe', '/download/Voxel-Setup-1.0.101.exe'], (req, res) => {
   const localSetup = path.join(__dirname, 'Voxel-Setup.exe');
   if (fs.existsSync(localSetup)) {
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.98.exe"');
+    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.101.exe"');
     return res.sendFile(localSetup);
   }
-  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.98/Voxel-Setup-1.0.98.exe');
+  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.101/Voxel-Setup-1.0.101.exe');
 });
 
 // SPA fallback for web browser access
