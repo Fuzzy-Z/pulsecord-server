@@ -1,6 +1,15 @@
 import crypto from 'crypto';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'voxel-pulsecord-jwt-secret-key-2026-production-secure';
+// SECURITY: JWT_SECRET must be set via environment variable.
+// A hardcoded fallback would allow anyone with source access to forge valid session tokens.
+if (!process.env.JWT_SECRET) {
+  throw new Error(
+    '[FATAL] JWT_SECRET environment variable is not set. ' +
+    'Generate a strong secret (e.g. `openssl rand -hex 64`) and add it to your .env file. ' +
+    'The server will not start without it.'
+  );
+}
+const JWT_SECRET = process.env.JWT_SECRET;
 const DEFAULT_EXPIRY_DAYS = 30;
 
 /**

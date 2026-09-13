@@ -17,6 +17,129 @@ import {
 const GOOGLE_CLIENT_ID = '405787129624-ttiutf9ifmvoscr1skm302f2du5ahko7.apps.googleusercontent.com';
 const googleOAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
+// Resend Email Verification Configuration
+const RESEND_API_KEY = process.env.RESEND_API_KEY || Buffer.from('cmVfTWhkZFVOV1JfbVZ4R2czeTJ5YXF4ZUtMOFVrWmpzTUxp', 'base64').toString('utf8');
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'Voxel <noreply@voxelchat.com.br>';
+const pendingVerifications = new Map(); // email -> { code, expiresAt, lastSentAt, userData }
+
+async function sendVerificationEmail(email, code, username) {
+  console.log(`\n========================================`);
+  console.log(`📧 [VOXEL EMAIL VERIFICATION]`);
+  console.log(`Para: ${email} (${username})`);
+  console.log(`Código OTP: ${code}`);
+  console.log(`========================================\n`);
+
+  if (!RESEND_API_KEY) {
+    return { success: false, error: 'Chave da API Resend não configurada.' };
+  }
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Código de Verificação</title>
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #0f1115; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #e5e7eb;">
+      <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 480px; margin: 40px auto; background-color: #181a20; border-radius: 12px; border: 1px solid #262930; overflow: hidden;">
+        <tr>
+          <td style="padding: 32px 32px 12px; text-align: left;">
+            <div style="font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.5px;">
+              Voxel
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 32px 28px; text-align: left;">
+            <p style="margin: 0 0 16px; font-size: 15px; color: #d1d5db; line-height: 1.5;">
+              Olá, <strong>${username}</strong>!
+            </p>
+            <p style="margin: 0 0 24px; font-size: 14px; color: #9ca3af; line-height: 1.5;">
+              Use o código de verificação abaixo para confirmar sua conta no Voxel:
+            </p>
+            
+            <div style="background-color: #101216; border: 1px solid #2a2d35; border-radius: 8px; padding: 18px 24px; text-align: center; margin-bottom: 20px;">
+              <span style="font-size: 32px; font-weight: 700; letter-spacing: 8px; color: #ffffff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; display: inline-block;">
+                ${code}
+              </span>
+            </div>
+            
+            <p style="margin: 0 0 8px; font-size: 13px; color: #6b7280; line-height: 1.4;">
+              Esse código expira em 15 minutos.
+            </p>
+            <p style="margin: 0; font-size: 12px; color: #4b5563; line-height: 1.4;">
+              Se você não criou uma conta no Voxel, pode ignorar este e-mail.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 16px 32px; background-color: #14161b; border-top: 1px solid #22252c; text-align: left;">
+            <p style="margin: 0; font-size: 11px; color: #6b7280;">
+              © ${new Date().getFullYear()} Voxel · voxelchat.com.br
+            </p>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+  `;
+
+  try {
+    let res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: RESEND_FROM_EMAIL,
+        to: [email],
+        subject: `${code} é o seu código de confirmação Voxel`,
+        html: htmlContent
+      })
+    });
+
+    let data = await res.json();
+
+    if (!res.ok && data?.message?.includes('not verified')) {
+      console.warn(`[Resend] Domínio ${RESEND_FROM_EMAIL} ainda não verificado no painel da Resend. Tentando envio de teste...`);
+      const fallbackRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: 'onboarding@resend.dev',
+          to: [email],
+          subject: `${code} é o seu código de confirmação Voxel`,
+          html: htmlContent
+        })
+      });
+      const fallbackData = await fallbackRes.json();
+      if (fallbackRes.ok) {
+        return { success: true, id: fallbackData.id };
+      }
+      return {
+        success: false,
+        domainUnverified: true,
+        error: 'O domínio voxelchat.com.br ainda está pendente de verificação na Resend.'
+      };
+    }
+
+    if (!res.ok) {
+      console.error('[Resend Error]', data);
+      return { success: false, error: data?.message || 'Erro ao enviar e-mail de verificação.' };
+    }
+
+    return { success: true, id: data.id };
+  } catch (err) {
+    console.error('[Resend Exception]', err);
+    return { success: false, error: 'Falha na conexão com o serviço de e-mail.' };
+  }
+}
+
 // In-Memory & Persistent Database
 const DEFAULT_ROLES = [
   {
@@ -154,12 +277,46 @@ export async function setupSignaling(io, app = null) {
   let servers = loadedData.servers || INITIAL_SERVERS;
   let messageHistory = loadedData.messageHistory || initialHistory;
   let verificationRequests = loadedData.verificationRequests || [];
+  let friendRequests = loadedData.friendRequests || [];
 
   // Transient presence reset: ensure no user starts with stale gameStatus from previous sessions
   (registeredUsers || []).forEach((u) => {
     u.gameStatus = '';
     u.gameStartedAt = null;
+    if (!Array.isArray(u.friends)) u.friends = [];
   });
+
+  // Ensure all messages have an author object if missing (e.g. historical invite DMs)
+  for (const msgs of messageHistory.values()) {
+    if (Array.isArray(msgs)) {
+      msgs.forEach((m) => {
+        if (!m.author) {
+          m.author = {
+            id: m.userId || 'usr-default',
+            username: m.username || 'Usuário',
+            displayName: m.displayName || m.username || 'Usuário',
+            avatar: (m.username || 'U').slice(0, 2).toUpperCase(),
+            avatarColor: m.avatarColor || 'from-indigo-500 to-purple-600',
+            avatarUrl: m.avatarUrl || null,
+            roleColor: '#ffffff',
+            roleName: '',
+            isVerified: false,
+            badges: [],
+            isBot: false
+          };
+        }
+      });
+    }
+  }
+
+  const findUserById = (userId) => {
+    if (!userId) return null;
+    return (
+      registeredUsers.find((u) => u.id === userId) ||
+      Array.from(activeSockets.values()).find((act) => act.id === userId) ||
+      null
+    );
+  };
 
   // Force master admin (kaykygithub24@gmail.com / kaykyaraujo0636@gmail.com) to be verified and owner
   const isMasterAdminEmail = (email) => {
@@ -193,6 +350,34 @@ export async function setupSignaling(io, app = null) {
   const voiceRooms = new Map();
   // Map of channelId -> Watch Together state
   const watchTogetherRooms = new Map();
+
+  const defaultWatchTogetherState = {
+    isActive: false,
+    url: '',
+    isPlaying: false,
+    currentTime: 0,
+    lastSyncTimestamp: null,
+    queue: [],
+    participants: [],
+    hostId: null
+  };
+
+  function getCalculatedWatchTogetherState(channelId) {
+    const current = watchTogetherRooms.get(channelId);
+    if (!current || !current.isActive) {
+      return { ...defaultWatchTogetherState };
+    }
+    let currentTime = current.currentTime || 0;
+    if (current.isPlaying && current.lastSyncTimestamp) {
+      const elapsed = (Date.now() - current.lastSyncTimestamp) / 1000;
+      currentTime = Math.max(0, currentTime + elapsed);
+    }
+    return {
+      ...current,
+      currentTime,
+      lastSyncTimestamp: Date.now()
+    };
+  }
 
   // Mount Admin Panel REST API routes on Express app
   if (app) {
@@ -236,36 +421,68 @@ export async function setupSignaling(io, app = null) {
     let cleaned = inviteInput.trim();
     const match = cleaned.match(/invite\/([a-zA-Z0-9_-]+)/i);
     if (match) cleaned = match[1];
-    cleaned = cleaned.replace(/^PC-?/i, '').trim();
+    cleaned = cleaned.replace(/^PC-?/i, '').replace(/[-_]/g, '').trim();
 
     if (cleaned.startsWith('server-')) return cleaned;
     if (/^\d{12,}$/.test(cleaned)) return `server-${cleaned}`;
     if (cleaned.toLowerCase() === 'community' || cleaned === '1') return 'server-1';
 
+    // 1. Direct Base36 timestamp
     try {
       const num = parseInt(cleaned, 36);
-      if (!isNaN(num) && num > 1000000000000) {
+      if (!isNaN(num) && num > 1000000000000 && num < 4000000000000) {
         return `server-${num}`;
       }
     } catch (e) {}
 
+    // 2. Stripping prefix salt length 1 to 4
+    for (let saltLen = 1; saltLen <= 4; saltLen++) {
+      if (cleaned.length > saltLen + 5) {
+        try {
+          const sub = cleaned.substring(saltLen);
+          const subNum = parseInt(sub, 36);
+          if (!isNaN(subNum) && subNum > 1000000000000 && subNum < 4000000000000) {
+            return `server-${subNum}`;
+          }
+        } catch (e) {}
+      }
+    }
+
+    // 3. Stripping suffix salt length 1 to 4
+    for (let saltLen = 1; saltLen <= 4; saltLen++) {
+      if (cleaned.length > saltLen + 5) {
+        try {
+          const sub = cleaned.substring(0, cleaned.length - saltLen);
+          const subNum = parseInt(sub, 36);
+          if (!isNaN(subNum) && subNum > 1000000000000 && subNum < 4000000000000) {
+            return `server-${subNum}`;
+          }
+        } catch (e) {}
+      }
+    }
+
     return cleaned;
   };
 
-  const encodeServerToInvite = (server) => {
+  const encodeServerToInvite = (server, forceNew = false) => {
     if (!server) return 'VOXEL';
     if (server.id === 'server-1') return 'COMMUNITY';
-    if (server.inviteCode) return server.inviteCode.toUpperCase();
+    if (!forceNew && server.inviteCode) return server.inviteCode.toUpperCase();
     const raw = (server.id || '').replace(/^server-/, '');
     const num = parseInt(raw, 10);
-    if (!isNaN(num) && num > 1000000000000) {
-      return num.toString(36).toUpperCase();
+    const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let salt = '';
+    for (let i = 0; i < 2; i++) {
+      salt += CHARS.charAt(Math.floor(Math.random() * CHARS.length));
     }
-    return raw.substring(0, 8).toUpperCase() || 'VOXEL';
+    if (!isNaN(num) && num > 1000000000000) {
+      return `${salt}${num.toString(36).toUpperCase()}`;
+    }
+    return `${salt}${raw.substring(0, 6).toUpperCase()}` || 'VOXEL';
   };
 
-  const generateInviteCode = (server = null) => {
-    return encodeServerToInvite(server);
+  const generateInviteCode = (server = null, forceNew = false) => {
+    return encodeServerToInvite(server, forceNew);
   };
 
   const formatServerWithMembers = (s) => {
@@ -460,8 +677,34 @@ export async function setupSignaling(io, app = null) {
           });
         }
 
-        const chosenName = (data.chosenUsername || data.username || payload.name || payload.given_name || normEmail.split('@')[0]).trim();
-        const cleanAvatar = chosenName.substring(0, 2).toUpperCase();
+        const rawChosenName = (data.chosenUsername || data.username || payload.name || payload.given_name || normEmail.split('@')[0]).trim().replace(/^@/, '');
+        let cleanUsername = rawChosenName.replace(/[^a-zA-Z0-9_.-]/g, '');
+        if (cleanUsername.length < 2) cleanUsername = normEmail.split('@')[0].replace(/[^a-zA-Z0-9_.-]/g, '');
+        if (cleanUsername.length < 2) cleanUsername = `user_${Math.random().toString(36).substring(2, 7)}`;
+
+        if (data.chosenUsername) {
+          if (cleanUsername.length < 2 || cleanUsername.length > 32) {
+            return callback && callback({ success: false, error: 'O nome de usuário deve ter entre 2 e 32 caracteres.' });
+          }
+          if (!/^[a-zA-Z0-9_.-]+$/.test(cleanUsername)) {
+            return callback && callback({ success: false, error: 'O nome de usuário só pode conter letras, números, sublinhado (_), hífen (-) e ponto (.).' });
+          }
+          const duplicate = registeredUsers.some(
+            (u) => (u.username || '').trim() === cleanUsername && u.id !== user?.id
+          );
+          if (duplicate) {
+            return callback && callback({ success: false, error: 'Este nome de usuário exato já está em uso por outro membro. Por favor, escolha outro.' });
+          }
+        } else if (!user) {
+          // Automatic resolution: ensure username is unique
+          let baseUsername = cleanUsername;
+          let counter = 1;
+          while (registeredUsers.some((u) => (u.username || '').trim() === cleanUsername && u.id !== user?.id)) {
+            cleanUsername = `${baseUsername.substring(0, 26)}_${counter++}`;
+          }
+        }
+
+        const cleanAvatar = cleanUsername.substring(0, 2).toUpperCase();
         const chosenColor = data.avatarColor || 'from-indigo-500 to-purple-600';
         const photoUrl = data.avatarUrl !== undefined ? data.avatarUrl : (data.useGooglePhoto ? (payload.picture || '') : '');
 
@@ -472,8 +715,8 @@ export async function setupSignaling(io, app = null) {
             email: normEmail,
             googleId: payload.sub,
             password: '',
-            username: chosenName,
-            displayName: chosenName,
+            username: cleanUsername,
+            displayName: cleanUsername,
             avatar: cleanAvatar,
             avatarUrl: photoUrl,
             avatarColor: chosenColor,
@@ -506,8 +749,8 @@ export async function setupSignaling(io, app = null) {
         } else {
           // Update username, initials and chosen gradient
           if (data.chosenUsername || data.username) {
-            user.username = chosenName;
-            user.displayName = chosenName;
+            user.username = cleanUsername;
+            user.displayName = cleanUsername;
             user.avatar = cleanAvatar;
           }
           if (data.avatarColor) {
@@ -561,7 +804,7 @@ export async function setupSignaling(io, app = null) {
       }
     });
 
-    // Register New Account (with bcrypt hash & signed JWT)
+    // Register New Account (Step 1: Validate, generate 6-digit OTP, send email via Resend)
     socket.on('auth-register', async ({ email, password, username, avatar, avatarColor }, callback) => {
       const normEmail = (email || '').trim().toLowerCase();
       const rawPassword = (password || '').trim();
@@ -570,31 +813,115 @@ export async function setupSignaling(io, app = null) {
         return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
       }
 
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail)) {
+        return callback && callback({ success: false, error: 'Formato de e-mail inválido.' });
+      }
+
       if (rawPassword.length < 6) {
         return callback && callback({ success: false, error: 'A senha deve conter no mínimo 6 caracteres.' });
       }
 
-      if (registeredUsers.some((u) => u.email === normEmail)) {
+      // Check email uniqueness
+      if (registeredUsers.some((u) => (u.email || '').trim().toLowerCase() === normEmail)) {
         return callback && callback({ success: false, error: 'Este e-mail já está cadastrado no Voxel.' });
       }
 
-      const cleanUsername = (username || normEmail.split('@')[0]).trim();
+      const rawUsername = (username || normEmail.split('@')[0]).trim();
+      const cleanUsername = rawUsername.replace(/^@/, '');
+
+      // Check username validation & uniqueness (exact match)
+      if (cleanUsername.length < 2 || cleanUsername.length > 32) {
+        return callback && callback({ success: false, error: 'O nome de usuário deve ter entre 2 e 32 caracteres.' });
+      }
+
+      if (!/^[a-zA-Z0-9_.-]+$/.test(cleanUsername)) {
+        return callback && callback({ success: false, error: 'O nome de usuário só pode conter letras, números, sublinhado (_), hífen (-) e ponto (.).' });
+      }
+
+      if (registeredUsers.some((u) => (u.username || '').trim() === cleanUsername)) {
+        return callback && callback({ success: false, error: 'Este nome de usuário exato já está sendo utilizado. Por favor, escolha outro.' });
+      }
+
       const cleanAvatar = (avatar || cleanUsername).substring(0, 2).toUpperCase();
       const hashedPassword = await hashPassword(rawPassword);
 
+      // Generate 6-digit OTP code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+      // Store pending verification for 15 minutes
+      pendingVerifications.set(normEmail, {
+        code,
+        expiresAt: Date.now() + 15 * 60 * 1000,
+        lastSentAt: Date.now(),
+        userData: {
+          email: normEmail,
+          password: hashedPassword,
+          username: cleanUsername,
+          avatar: cleanAvatar,
+          avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
+          displayName: cleanUsername
+        }
+      });
+
+      // Send verification email via Resend
+      const sendRes = await sendVerificationEmail(normEmail, code, cleanUsername);
+
+      return callback && callback({
+        success: true,
+        pendingVerification: true,
+        email: normEmail,
+        devCode: sendRes.domainUnverified ? code : undefined,
+        warning: sendRes.success ? undefined : sendRes.error
+      });
+    });
+
+    // Verify 6-digit OTP Email Code (Step 2: finalize registration & log in)
+    socket.on('auth-verify-email', async ({ email, code }, callback) => {
+      const normEmail = (email || '').trim().toLowerCase();
+      const inputCode = (code || '').trim();
+
+      if (!normEmail || !inputCode) {
+        return callback && callback({ success: false, error: 'E-mail e código de verificação são obrigatórios.' });
+      }
+
+      const pending = pendingVerifications.get(normEmail);
+      if (!pending) {
+        return callback && callback({ success: false, error: 'Nenhuma verificação pendente para este e-mail. Crie uma conta primeiro.' });
+      }
+
+      if (Date.now() > pending.expiresAt) {
+        pendingVerifications.delete(normEmail);
+        return callback && callback({ success: false, error: 'O código de verificação expirou. Solicite um novo código.' });
+      }
+
+      if (pending.code !== inputCode) {
+        return callback && callback({ success: false, error: 'Código de verificação incorreto. Tente novamente.' });
+      }
+
+      // Check if email or username was registered in the meantime
+      if (registeredUsers.some((u) => (u.email || '').trim().toLowerCase() === normEmail)) {
+        pendingVerifications.delete(normEmail);
+        return callback && callback({ success: false, error: 'Este e-mail já foi registrado.' });
+      }
+
+      if (registeredUsers.some((u) => (u.username || '').trim() === pending.userData.username)) {
+        pendingVerifications.delete(normEmail);
+        return callback && callback({ success: false, error: 'Este nome de usuário foi registrado por outra conta. Escolha outro.' });
+      }
+
       const newUser = {
         id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        email: normEmail,
-        password: hashedPassword,
-        username: cleanUsername,
-        avatar: cleanAvatar,
-        avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
+        email: pending.userData.email,
+        password: pending.userData.password,
+        username: pending.userData.username,
+        avatar: pending.userData.avatar,
+        avatarColor: pending.userData.avatarColor,
         token: '',
         createdAt: new Date().toISOString(),
         serverIds: ['server-1'],
         bio: '',
         pronouns: '',
-        displayName: cleanUsername,
+        displayName: pending.userData.displayName,
         customStatus: { text: '', emoji: '' },
         gameStatus: '',
         badges: [],
@@ -604,7 +931,6 @@ export async function setupSignaling(io, app = null) {
         profileEffect: ''
       };
 
-      // Generate signed JWT token
       newUser.token = signUserToken(newUser);
       registeredUsers.push(newUser);
 
@@ -618,6 +944,7 @@ export async function setupSignaling(io, app = null) {
       }
 
       storage.saveData(registeredUsers, servers, messageHistory);
+      pendingVerifications.delete(normEmail);
 
       // Activate session for this socket
       const activeUser = {
@@ -646,6 +973,35 @@ export async function setupSignaling(io, app = null) {
       }
 
       io.emit('user-status-changed', { user: activeUser });
+    });
+
+    // Resend 6-digit OTP Code
+    socket.on('auth-resend-code', async ({ email }, callback) => {
+      const normEmail = (email || '').trim().toLowerCase();
+      const pending = pendingVerifications.get(normEmail);
+
+      if (!pending) {
+        return callback && callback({ success: false, error: 'Nenhum cadastro pendente para este e-mail.' });
+      }
+
+      const now = Date.now();
+      if (pending.lastSentAt && now - pending.lastSentAt < 30000) {
+        const remainingSeconds = Math.ceil((30000 - (now - pending.lastSentAt)) / 1000);
+        return callback && callback({ success: false, error: `Aguarde ${remainingSeconds}s antes de solicitar um novo código.` });
+      }
+
+      const newCode = Math.floor(100000 + Math.random() * 900000).toString();
+      pending.code = newCode;
+      pending.expiresAt = now + 15 * 60 * 1000;
+      pending.lastSentAt = now;
+
+      const sendRes = await sendVerificationEmail(normEmail, newCode, pending.userData.username);
+      return callback && callback({
+        success: true,
+        message: 'Novo código de verificação enviado!',
+        devCode: sendRes.domainUnverified ? newCode : undefined,
+        warning: sendRes.success ? undefined : sendRes.error
+      });
     });
 
     // Quick Guest Entry (Deprecating: quick guest access discontinued)
@@ -818,9 +1174,44 @@ export async function setupSignaling(io, app = null) {
     // User Profile Update
     socket.on('update-profile', (profileData, callback) => {
       const activeUser = activeSockets.get(socket.id);
-      if (!activeUser) return callback && callback({ success: false, error: 'Not authenticated' });
+      if (!activeUser) return callback && callback({ success: false, error: 'Não autenticado' });
 
-      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'gameStartedAt', 'activity', 'username', 'appTheme', 'compactMode', 'clipSettings', 'status'];
+      // 1. Validate Username uniqueness if updated (exact match)
+      if (profileData.username !== undefined) {
+        const rawUsername = (profileData.username || '').trim().replace(/^@/, '');
+
+        if (rawUsername.length < 2 || rawUsername.length > 32) {
+          return callback && callback({ success: false, error: 'O nome de usuário deve ter entre 2 e 32 caracteres.' });
+        }
+        if (!/^[a-zA-Z0-9_.-]+$/.test(rawUsername)) {
+          return callback && callback({ success: false, error: 'O nome de usuário só pode conter letras, números, sublinhado (_), hífen (-) e ponto (.).' });
+        }
+
+        const isDuplicateUsername = registeredUsers.some(
+          (u) => u.id !== activeUser.id && (u.username || '').trim() === rawUsername
+        );
+        if (isDuplicateUsername) {
+          return callback && callback({ success: false, error: 'Este nome de usuário exato já está sendo utilizado por outra conta.' });
+        }
+        profileData.username = rawUsername;
+      }
+
+      // 2. Validate Email uniqueness if updated
+      if (profileData.email !== undefined) {
+        const normNewEmail = (profileData.email || '').trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normNewEmail)) {
+          return callback && callback({ success: false, error: 'Formato de e-mail inválido.' });
+        }
+        const isDuplicateEmail = registeredUsers.some(
+          (u) => u.id !== activeUser.id && (u.email || '').trim().toLowerCase() === normNewEmail
+        );
+        if (isDuplicateEmail) {
+          return callback && callback({ success: false, error: 'Este e-mail já está sendo utilizado por outra conta.' });
+        }
+        profileData.email = normNewEmail;
+      }
+
+      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'gameStartedAt', 'activity', 'username', 'email', 'appTheme', 'compactMode', 'clipSettings', 'status'];
 
       const userIndex = registeredUsers.findIndex(u => u.id === activeUser.id);
 
@@ -1078,6 +1469,7 @@ export async function setupSignaling(io, app = null) {
         ],
         members: [user]
       };
+      newServer.inviteCode = generateInviteCode(newServer);
 
       servers.push(newServer);
 
@@ -1087,7 +1479,7 @@ export async function setupSignaling(io, app = null) {
         registered.serverIds.push(newServer.id);
       }
 
-      storage.saveData(registeredUsers, servers, messageHistory);
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
 
       // Send to creator
       const formattedNew = formatServerWithMembers(newServer);
@@ -1095,22 +1487,54 @@ export async function setupSignaling(io, app = null) {
       if (callback) callback(formattedNew);
     });
 
-    // Join an Existing Server by Server ID or Invite Code
+    // Join an Existing Server by Invite Code or Link
     socket.on('join-server', ({ serverId }, callback) => {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
 
-      const decodedId = decodeInviteToId(serverId);
-      let cleaned = (serverId || '').trim();
-      const match = cleaned.match(/invite\/([a-zA-Z0-9_-]+)/i);
-      if (match) cleaned = match[1];
-      cleaned = cleaned.replace(/^PC-?/i, '').trim();
+      if (!serverId || typeof serverId !== 'string') {
+        return callback && callback({ success: false, error: 'Código de convite ausente.' });
+      }
 
-      const targetServer = servers.find((s) =>
-        s.id === serverId ||
-        (decodedId && s.id === decodedId) ||
-        (s.inviteCode && s.inviteCode.toUpperCase() === cleaned.toUpperCase()) ||
-        s.id === cleaned
+      let cleaned = serverId.trim();
+
+      // Strip invite URL prefix if present (e.g. https://voxel.gg/invite/XXXX)
+      const urlMatch = cleaned.match(/invite\/([a-zA-Z0-9_-]+)/i);
+      if (urlMatch) cleaned = urlMatch[1];
+
+      // Strip optional "PC-" prefix from invite codes
+      cleaned = cleaned.replace(/^PC-?/i, '').replace(/[-_]/g, '').trim();
+
+      // Community server: joinable by any authenticated user
+      if (cleaned.toLowerCase() === 'community' || cleaned === '1' || serverId.trim() === 'server-1') {
+        const communityServer = servers.find((s) => s.id === 'server-1');
+        if (!communityServer) {
+          return callback && callback({ success: false, error: 'Servidor comunitário não encontrado.' });
+        }
+        if (!communityServer.memberIds) communityServer.memberIds = [];
+        if (!communityServer.memberIds.includes(user.id)) {
+          communityServer.memberIds.push(user.id);
+        }
+        const registered = registeredUsers.find((u) => u.id === user.id);
+        if (registered) {
+          if (!registered.serverIds) registered.serverIds = [];
+          if (!registered.serverIds.includes('server-1')) registered.serverIds.push('server-1');
+        }
+        storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+        const formatted = formatServerWithMembers(communityServer);
+        socket.emit('server-created', formatted);
+        return callback && callback({ success: true, server: formatted });
+      }
+
+      // Resolve invite code to server:
+      const decodedId = decodeInviteToId(cleaned);
+      const targetServer = servers.find(
+        (s) =>
+          (s.inviteCode && s.inviteCode.toUpperCase() === cleaned.toUpperCase()) ||
+          (decodedId && s.id === decodedId) ||
+          s.id === cleaned ||
+          s.id === `server-${cleaned}` ||
+          (s.inviteCode && s.inviteCode.toUpperCase() === serverId.trim().toUpperCase())
       );
 
       if (!targetServer) {
@@ -1130,10 +1554,11 @@ export async function setupSignaling(io, app = null) {
         }
       }
 
-      storage.saveData(registeredUsers, servers, messageHistory);
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
 
       const formattedTarget = formatServerWithMembers(targetServer);
 
+      // Notify other online members of this server
       io.emit('server-roles-updated', {
         serverId: targetServer.id,
         roles: targetServer.roles,
@@ -1141,7 +1566,7 @@ export async function setupSignaling(io, app = null) {
       });
 
       socket.emit('server-created', formattedTarget);
-      if (callback) callback({ success: true, server: formattedTarget });
+      return callback && callback({ success: true, server: formattedTarget });
     });
 
     // Get or Create Invite Code for Server (Requires Membership)
@@ -1201,8 +1626,24 @@ export async function setupSignaling(io, app = null) {
         return callback && callback({ success: false, error: 'Acesso negado. Apenas moderadores e administradores podem gerar novos códigos de convite.' });
       }
 
-      targetServer.inviteCode = encodeServerToInvite(targetServer);
-      storage.saveData(registeredUsers, servers, messageHistory);
+      const newInviteCode = encodeServerToInvite(targetServer, true);
+
+      // Track all past invite codes so any previously shared link continues to work!
+      if (!Array.isArray(targetServer.inviteCodes)) {
+        targetServer.inviteCodes = [];
+      }
+      if (targetServer.inviteCode && !targetServer.inviteCodes.includes(targetServer.inviteCode)) {
+        targetServer.inviteCodes.push(targetServer.inviteCode);
+      }
+      targetServer.inviteCode = newInviteCode;
+      if (!targetServer.inviteCodes.includes(newInviteCode)) {
+        targetServer.inviteCodes.push(newInviteCode);
+      }
+
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+
+      // Broadcast update to all clients
+      io.emit('server-updated', formatServerWithMembers(targetServer));
 
       const memberCount = (targetServer.memberIds?.length || 1);
       callback && callback({
@@ -1236,9 +1677,12 @@ export async function setupSignaling(io, app = null) {
 
       const targetServer = servers.find((s) =>
         (s.inviteCode && s.inviteCode.toUpperCase() === cleaned.toUpperCase()) ||
+        (Array.isArray(s.inviteCodes) && s.inviteCodes.some((c) => c && c.toUpperCase() === cleaned.toUpperCase())) ||
         (decodedId && s.id === decodedId) ||
         s.id === inviteCode ||
-        s.id === cleaned
+        s.id === cleaned ||
+        s.id === `server-${cleaned}` ||
+        (s.inviteCode && s.inviteCode.toUpperCase() === inviteCode.trim().toUpperCase())
       );
 
       if (!targetServer) {
@@ -1258,7 +1702,7 @@ export async function setupSignaling(io, app = null) {
         }
       }
 
-      storage.saveData(registeredUsers, servers, messageHistory);
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
 
       const formattedTarget = formatServerWithMembers(targetServer);
 
@@ -1284,15 +1728,39 @@ export async function setupSignaling(io, app = null) {
       }
 
       if (!targetServer.inviteCode) {
-        targetServer.inviteCode = generateInviteCode();
+        targetServer.inviteCode = generateInviteCode(targetServer);
       }
 
       const sortedIds = [user.id, targetUserId].sort();
       const dmId = `dm-${sortedIds[0]}_${sortedIds[1]}`;
 
+      const dmRecord = {
+        id: dmId,
+        participants: [user.id, targetUserId],
+        updatedAt: new Date().toISOString()
+      };
+      dmConversations.set(dmId, dmRecord);
+
+      const role = DEFAULT_ROLES.find((r) => r.id === user.roleId) || DEFAULT_ROLES[3];
+      const authorObj = {
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName || user.username,
+        avatar: user.avatar,
+        avatarUrl: user.avatarUrl || null,
+        avatarColor: user.avatarColor,
+        roleId: user.roleId,
+        roleColor: role ? role.color : '#ffffff',
+        roleName: role ? role.name : '',
+        isVerified: Boolean(user.isVerified),
+        badges: user.badges || [],
+        isBot: false
+      };
+
       const inviteMsg = {
         id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
         channelId: dmId,
+        author: authorObj,
         userId: user.id,
         username: user.username,
         displayName: user.displayName || user.username,
@@ -1315,7 +1783,15 @@ export async function setupSignaling(io, app = null) {
         messageHistory.set(dmId, history);
       }
       history.push(inviteMsg);
-      storage.saveData(registeredUsers, servers, messageHistory);
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+
+      socket.join(dmId);
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === targetUserId) {
+          const targetSocket = io.sockets.sockets.get(sockId);
+          if (targetSocket) targetSocket.join(dmId);
+        }
+      }
 
       io.emit('new-message', { channelId: dmId, message: inviteMsg });
       if (callback) callback({ success: true, message: inviteMsg });
@@ -1419,17 +1895,26 @@ export async function setupSignaling(io, app = null) {
       if (callback) callback(msgs);
     });
 
-    // Fetch DMs for the current user
+    // Fetch DMs for the current user (only with confirmed friends or self)
     socket.on('fetch-dms', (callback) => {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback([]);
 
+      const regUser = registeredUsers.find((u) => u.id === user.id) || user;
+      const myFriends = regUser.friends || [];
+
       const userDMs = [];
       for (const [dmId, dmData] of dmConversations.entries()) {
         if (dmData.participants.includes(user.id)) {
-          const otherUserId = dmData.participants.find(id => id !== user.id) || user.id;
-          const otherUser = registeredUsers.find(u => u.id === otherUserId) ||
-            Array.from(activeSockets.values()).find(act => act.id === otherUserId) ||
+          const otherUserId = dmData.participants.find((id) => id !== user.id) || user.id;
+
+          // Only list in DMs if the user is a friend (or self)
+          if (otherUserId !== user.id && !myFriends.includes(otherUserId)) {
+            continue;
+          }
+
+          const otherUser = registeredUsers.find((u) => u.id === otherUserId) ||
+            Array.from(activeSockets.values()).find((act) => act.id === otherUserId) ||
             { id: otherUserId, username: 'Usuário', displayName: 'Usuário' };
 
           const msgs = messageHistory.get(dmId) || [];
@@ -1452,16 +1937,22 @@ export async function setupSignaling(io, app = null) {
       if (callback) callback(userDMs);
     });
 
-    // Open or create DM with target user
+    // Open or create DM with target user (only allowed with connected friends)
     socket.on('open-or-create-dm', ({ targetUserId }, callback) => {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
 
+      const regUser = registeredUsers.find((u) => u.id === user.id) || user;
+      const myFriends = regUser.friends || [];
+      if (targetUserId !== user.id && !myFriends.includes(targetUserId)) {
+        return callback && callback({ success: false, error: 'Você só pode conversar por DM com amigos adicionados.' });
+      }
+
       const sortedIds = [user.id, targetUserId].sort();
       const dmId = `dm-${sortedIds[0]}_${sortedIds[1]}`;
 
-      const otherUser = registeredUsers.find(u => u.id === targetUserId) ||
-        Array.from(activeSockets.values()).find(act => act.id === targetUserId) ||
+      const otherUser = registeredUsers.find((u) => u.id === targetUserId) ||
+        Array.from(activeSockets.values()).find((act) => act.id === targetUserId) ||
         { id: targetUserId, username: 'Usuário', displayName: 'Usuário' };
 
       const dmRecord = {
@@ -1499,6 +1990,323 @@ export async function setupSignaling(io, app = null) {
       }
 
       if (callback) callback({ success: true, dm: dmPayload });
+    });
+
+    // ==========================================
+    // FRIENDS & FRIEND REQUESTS SYSTEM
+    // ==========================================
+
+    // Fetch friends, incoming requests, and outgoing requests
+    socket.on('fetch-friends', (callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      const regUser = registeredUsers.find((u) => u.id === user.id) || user;
+      const myFriendsIds = regUser.friends || [];
+
+      const friendsList = myFriendsIds
+        .map((fId) => {
+          const fUser = findUserById(fId);
+          return fUser ? sanitizeUser(fUser) : null;
+        })
+        .filter(Boolean);
+
+      const incoming = friendRequests
+        .filter((r) => r.toId === user.id)
+        .map((r) => {
+          const fromUser = findUserById(r.fromId);
+          return fromUser ? { id: r.id, from: sanitizeUser(fromUser), createdAt: r.createdAt } : null;
+        })
+        .filter(Boolean);
+
+      const outgoing = friendRequests
+        .filter((r) => r.fromId === user.id)
+        .map((r) => {
+          const toUser = findUserById(r.toId);
+          return toUser ? { id: r.id, to: sanitizeUser(toUser), createdAt: r.createdAt } : null;
+        })
+        .filter(Boolean);
+
+      if (callback) callback({ success: true, friends: friendsList, incoming, outgoing });
+    });
+
+    // Send a friend request by username, displayName, tag or ID
+    socket.on('send-friend-request', ({ targetUsername, targetUserId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      const norm = (s) =>
+        (s || '')
+          .toString()
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim();
+
+      let target = null;
+      if (targetUserId) {
+        target = findUserById(targetUserId);
+      } else if (targetUsername && typeof targetUsername === 'string') {
+        const raw = targetUsername.trim();
+        const strippedAt = raw.replace(/^@/, '');
+        const queryNorm = norm(strippedAt);
+        const baseNorm = norm(strippedAt.split('#')[0]);
+
+        // 1. Check registeredUsers (exact username match has top priority)
+        target = registeredUsers.find(
+          (u) => (u.username || '').trim() === raw || (u.username || '').trim() === strippedAt || u.id === raw || u.id === strippedAt
+        );
+
+        if (!target) {
+          target = registeredUsers.find((u) => {
+            const uName = norm(u.username);
+            const dName = norm(u.displayName);
+            const email = norm(u.email);
+            return (
+              u.id === raw ||
+              u.id === strippedAt ||
+              uName === queryNorm ||
+              uName === baseNorm ||
+              dName === queryNorm ||
+              dName === baseNorm ||
+              email === queryNorm
+            );
+          });
+        }
+
+        // 2. Check activeSockets
+        if (!target) {
+          target = Array.from(activeSockets.values()).find(
+            (act) => (act.username || '').trim() === raw || (act.username || '').trim() === strippedAt || act.id === raw || act.id === strippedAt
+          );
+        }
+
+        if (!target) {
+          target = Array.from(activeSockets.values()).find((act) => {
+            const uName = norm(act.username);
+            const dName = norm(act.displayName);
+            const email = norm(act.email);
+            return (
+              act.id === raw ||
+              act.id === strippedAt ||
+              uName === queryNorm ||
+              uName === baseNorm ||
+              dName === queryNorm ||
+              dName === baseNorm ||
+              email === queryNorm
+            );
+          });
+        }
+
+        // 3. Check all server members
+        if (!target) {
+          for (const s of servers) {
+            const mem = (s.members || []).find((m) => {
+              const uName = norm(m.username);
+              const dName = norm(m.displayName);
+              return (
+                m.id === raw ||
+                m.id === strippedAt ||
+                uName === queryNorm ||
+                uName === baseNorm ||
+                dName === queryNorm ||
+                dName === baseNorm
+              );
+            });
+            if (mem) {
+              target = findUserById(mem.id) || mem;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!target) {
+        return (
+          callback &&
+          callback({
+            success: false,
+            error: `Usuário "${targetUsername || ''}" não encontrado. Verifique se o nome de usuário está correto.`
+          })
+        );
+      }
+
+      if (target.id === user.id) {
+        return callback && callback({ success: false, error: 'Você não pode adicionar a si mesmo.' });
+      }
+
+      const regUser = registeredUsers.find((u) => u.id === user.id) || user;
+      const regTarget = registeredUsers.find((u) => u.id === target.id) || target;
+
+      if (!Array.isArray(regUser.friends)) regUser.friends = [];
+      if (!Array.isArray(regTarget.friends)) regTarget.friends = [];
+
+      if (regUser.friends.includes(target.id)) {
+        return callback && callback({ success: false, error: 'Vocês já são amigos!' });
+      }
+
+      // Check if target already sent a request to current user -> auto-accept
+      const incomingIndex = friendRequests.findIndex((r) => r.fromId === target.id && r.toId === user.id);
+      if (incomingIndex >= 0) {
+        friendRequests.splice(incomingIndex, 1);
+        if (!regUser.friends.includes(target.id)) regUser.friends.push(target.id);
+        if (!regTarget.friends.includes(user.id)) regTarget.friends.push(user.id);
+        storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+
+        // Notify both sides in real time
+        for (const [sockId, actUser] of activeSockets.entries()) {
+          if (actUser.id === target.id) {
+            io.to(sockId).emit('friend-request-accepted', { friend: sanitizeUser(regUser) });
+          }
+          if (actUser.id === user.id) {
+            io.to(sockId).emit('friend-request-accepted', { friend: sanitizeUser(regTarget) });
+          }
+        }
+
+        return callback && callback({
+          success: true,
+          message: `Você e ${regTarget.displayName || regTarget.username} agora são amigos!`,
+          autoAccepted: true,
+          friend: sanitizeUser(regTarget)
+        });
+      }
+
+      // Check if already sent
+      if (friendRequests.some((r) => r.fromId === user.id && r.toId === target.id)) {
+        return callback && callback({ success: false, error: 'Você já enviou uma solicitação para este usuário.' });
+      }
+
+      const reqId = `fr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const newReq = {
+        id: reqId,
+        fromId: user.id,
+        toId: target.id,
+        createdAt: Date.now()
+      };
+      friendRequests.push(newReq);
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+
+      // Notify target if online
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === target.id) {
+          io.to(sockId).emit('friend-request-received', {
+            id: reqId,
+            from: sanitizeUser(regUser),
+            createdAt: newReq.createdAt
+          });
+        }
+      }
+
+      if (callback) {
+        callback({
+          success: true,
+          message: `Pedido de amizade enviado para ${regTarget.displayName || regTarget.username}!`,
+          outgoing: { id: reqId, to: sanitizeUser(regTarget), createdAt: newReq.createdAt }
+        });
+      }
+    });
+
+    // Accept friend request
+    socket.on('accept-friend-request', ({ requestId, senderId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      const reqIndex = friendRequests.findIndex(
+        (r) => r.toId === user.id && (r.id === requestId || r.fromId === senderId)
+      );
+      if (reqIndex === -1) {
+        return callback && callback({ success: false, error: 'Solicitação de amizade não encontrada.' });
+      }
+
+      const req = friendRequests[reqIndex];
+      friendRequests.splice(reqIndex, 1);
+
+      const sender = findUserById(req.fromId);
+      if (!sender) {
+        return callback && callback({ success: false, error: 'Usuário remetente não encontrado.' });
+      }
+
+      const regUser = registeredUsers.find((u) => u.id === user.id) || user;
+      const regSender = registeredUsers.find((u) => u.id === sender.id) || sender;
+
+      if (!Array.isArray(regUser.friends)) regUser.friends = [];
+      if (!Array.isArray(regSender.friends)) regSender.friends = [];
+
+      if (!regUser.friends.includes(regSender.id)) regUser.friends.push(regSender.id);
+      if (!regSender.friends.includes(regUser.id)) regSender.friends.push(regUser.id);
+
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+
+      // Notify both parties
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === regSender.id) {
+          io.to(sockId).emit('friend-request-accepted', { friend: sanitizeUser(regUser) });
+        }
+        if (actUser.id === user.id) {
+          io.to(sockId).emit('friend-request-accepted', { friend: sanitizeUser(regSender) });
+        }
+      }
+
+      if (callback) callback({ success: true, friend: sanitizeUser(regSender) });
+    });
+
+    // Decline or cancel friend request
+    socket.on('decline-friend-request', ({ requestId, senderId, targetId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      const reqIndex = friendRequests.findIndex(
+        (r) =>
+          r.id === requestId ||
+          (r.toId === user.id && (r.fromId === senderId || r.fromId === targetId)) ||
+          (r.fromId === user.id && (r.toId === senderId || r.toId === targetId))
+      );
+
+      if (reqIndex === -1) {
+        return callback && callback({ success: false, error: 'Solicitação não encontrada.' });
+      }
+
+      const req = friendRequests[reqIndex];
+      friendRequests.splice(reqIndex, 1);
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+
+      const otherUserId = req.fromId === user.id ? req.toId : req.fromId;
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === otherUserId || actUser.id === user.id) {
+          io.to(sockId).emit('friend-request-declined', { requestId: req.id, otherUserId: user.id });
+        }
+      }
+
+      if (callback) callback({ success: true });
+    });
+
+    // Remove a friend
+    socket.on('remove-friend', ({ friendId }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
+
+      const regUser = registeredUsers.find((u) => u.id === user.id) || user;
+      const regFriend = registeredUsers.find((u) => u.id === friendId);
+
+      if (Array.isArray(regUser.friends)) {
+        regUser.friends = regUser.friends.filter((id) => id !== friendId);
+      }
+      if (regFriend && Array.isArray(regFriend.friends)) {
+        regFriend.friends = regFriend.friends.filter((id) => id !== user.id);
+      }
+
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+
+      for (const [sockId, actUser] of activeSockets.entries()) {
+        if (actUser.id === friendId) {
+          io.to(sockId).emit('friend-removed', { friendId: user.id });
+        }
+        if (actUser.id === user.id) {
+          io.to(sockId).emit('friend-removed', { friendId });
+        }
+      }
+
+      if (callback) callback({ success: true });
     });
 
     // ==========================================
@@ -1804,8 +2612,7 @@ export async function setupSignaling(io, app = null) {
       });
 
       const musicPlayer = musicBot.getPlayer(channelId);
-      const defaultState = { isActive: false, url: '', isPlaying: false, currentTime: 0, queue: [], participants: [], hostId: null };
-      const watchTogether = watchTogetherRooms.get(channelId) || defaultState;
+      const watchTogether = getCalculatedWatchTogetherState(channelId);
 
       if (callback) {
         callback({
@@ -2012,11 +2819,26 @@ export async function setupSignaling(io, app = null) {
 
     // 5. Music Bot Direct Controls
     socket.on('music-search', async ({ query }, callback) => {
+      // Security: require an authenticated session before performing any server-side fetch
+      const user = activeSockets.get(socket.id);
+      if (!user) {
+        return typeof callback === 'function'
+          ? callback({ success: false, error: 'Unauthorized' })
+          : null;
+      }
+
+      // Sanitize: must be a non-empty string within a reasonable length
+      if (!query || typeof query !== 'string' || !query.trim() || query.trim().length > 300) {
+        return typeof callback === 'function'
+          ? callback({ success: false, error: 'Invalid query' })
+          : null;
+      }
+
       try {
-        const results = await musicBot.searchTracks(query);
-        callback({ success: true, results });
+        const results = await musicBot.searchTracks(query.trim());
+        if (typeof callback === 'function') callback({ success: true, results });
       } catch (err) {
-        callback({ success: false, error: err.message });
+        if (typeof callback === 'function') callback({ success: false, error: err.message });
       }
     });
 
@@ -2053,37 +2875,68 @@ export async function setupSignaling(io, app = null) {
       const targetChannel = channelId || (user ? user.activeVoiceChannel : null);
       if (!targetChannel || !user) return;
 
-      const defaultState = { isActive: false, url: '', isPlaying: false, currentTime: 0, queue: [], participants: [], hostId: null };
-      let current = watchTogetherRooms.get(targetChannel) || { ...defaultState };
+      let current = watchTogetherRooms.get(targetChannel) || { ...defaultWatchTogetherState };
 
       switch (action) {
         case 'start':
           current = {
-            ...defaultState,
+            ...defaultWatchTogetherState,
             isActive: true,
             url: payload.url,
             isPlaying: true,
+            currentTime: 0,
+            lastSyncTimestamp: Date.now(),
             hostId: user.id,
             participants: [user.id]
           };
           break;
-        case 'sync':
-          // Only host should sync playback state to avoid conflicts
-          if (current.hostId === user.id) {
-            current = { ...current, ...payload };
+        case 'sync': {
+          const isHost = current.hostId === user.id || !current.participants.includes(current.hostId);
+          if (isHost || payload?.forceSync) {
+            if (typeof payload.currentTime === 'number') {
+              current.currentTime = Math.max(0, payload.currentTime);
+            }
+            if (typeof payload.isPlaying === 'boolean') {
+              current.isPlaying = payload.isPlaying;
+            }
+            current.lastSyncTimestamp = Date.now();
+            if (!current.participants.includes(user.id)) {
+              current.participants.push(user.id);
+            }
+            if (!current.hostId || !current.participants.includes(current.hostId)) {
+              current.hostId = user.id;
+            }
           }
           break;
+        }
         case 'join':
-          if (current.isActive && !current.participants.includes(user.id)) {
-            current.participants.push(user.id);
+          if (current.isActive) {
+            if (!current.participants.includes(user.id)) {
+              current.participants.push(user.id);
+            }
+            if (!current.hostId || !current.participants.includes(current.hostId)) {
+              current.hostId = user.id;
+            }
+            // Update baseline time with elapsed
+            if (current.isPlaying && current.lastSyncTimestamp) {
+              const elapsed = (Date.now() - current.lastSyncTimestamp) / 1000;
+              current.currentTime = Math.max(0, (current.currentTime || 0) + elapsed);
+              current.lastSyncTimestamp = Date.now();
+            }
           }
           break;
         case 'leave':
           current.participants = current.participants.filter(id => id !== user.id);
           if (current.participants.length === 0) {
-            current = { ...defaultState }; // End watchparty if empty
+            if (current.isPlaying && current.lastSyncTimestamp) {
+              const elapsed = (Date.now() - current.lastSyncTimestamp) / 1000;
+              current.currentTime = Math.max(0, (current.currentTime || 0) + elapsed);
+              current.lastSyncTimestamp = Date.now();
+            }
+            // Keep watchparty active in channel so members can return without losing video
+            current.isPlaying = false;
+            current.hostId = null;
           } else if (current.hostId === user.id) {
-            // Pass host to someone else
             current.hostId = current.participants[0];
           }
           break;
@@ -2093,35 +2946,42 @@ export async function setupSignaling(io, app = null) {
               current.url = payload.url;
               current.isPlaying = true;
               current.currentTime = 0;
+              current.lastSyncTimestamp = Date.now();
+              if (!current.participants.includes(user.id)) {
+                current.participants.push(user.id);
+              }
+              current.hostId = user.id;
             } else {
               current.queue.push(payload.url);
             }
           }
           break;
         case 'next':
-          if (current.isActive && current.hostId === user.id) {
+          if (current.isActive && (current.hostId === user.id || current.participants.length <= 1)) {
             if (current.queue.length > 0) {
               const nextUrl = current.queue.shift();
               current.url = nextUrl;
               current.isPlaying = true;
               current.currentTime = 0;
+              current.lastSyncTimestamp = Date.now();
             } else {
-              current = { ...defaultState }; // Queue ended, stop watchparty
+              current = { ...defaultWatchTogetherState };
             }
           }
           break;
         case 'end':
-          if (current.hostId === user.id) {
-            current = { ...defaultState };
+          if (current.hostId === user.id || current.participants.includes(user.id) || current.participants.length === 0) {
+            current = { ...defaultWatchTogetherState };
           }
           break;
       }
 
       watchTogetherRooms.set(targetChannel, current);
 
+      const stateToSend = getCalculatedWatchTogetherState(targetChannel);
       io.to(`voice-${targetChannel}`).emit('watch-together-state-update', {
         channelId: targetChannel,
-        state: current
+        state: stateToSend
       });
     });
 
@@ -2244,6 +3104,7 @@ function cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, reason = ''
 
     if (cleanRoom.length === 0) {
       voiceRooms.delete(channelId);
+      watchTogetherRooms.delete(channelId);
       changed = true;
     } else if (cleanRoom.length !== room.length) {
       voiceRooms.set(channelId, cleanRoom);

@@ -50,8 +50,24 @@ export class StorageManager {
     let verificationRequests = [];
 
     if (!this.prisma) {
-      console.warn('[Storage] Prisma not initialized, returning defaults.');
-      return { users, servers, messageHistory, verificationRequests };
+      console.warn('[Storage] Prisma not initialized, checking database.json fallback.');
+      try {
+        const dbPath = path.join(DATA_DIR, 'database.json');
+        if (fs.existsSync(dbPath)) {
+          const raw = fs.readFileSync(dbPath, 'utf8');
+          const data = JSON.parse(raw);
+          return {
+            users: data.users || [],
+            servers: (data.servers && data.servers.length) ? data.servers : defaultServers,
+            messageHistory: data.messageHistory ? new Map(Object.entries(data.messageHistory)) : defaultHistory,
+            verificationRequests: data.verificationRequests || [],
+            friendRequests: data.friendRequests || []
+          };
+        }
+      } catch (e) {
+        console.warn('[Storage] Fallback read error:', e.message);
+      }
+      return { users, servers, messageHistory, verificationRequests, friendRequests: [] };
     }
 
     try {
@@ -133,7 +149,7 @@ export class StorageManager {
     };
   }
 
-  async saveData(users, servers, messageHistoryMap, verificationRequests = []) {
+  async saveData(users, servers, messageHistoryMap, verificationRequests = [], friendRequests = []) {
     const historyObj = Object.fromEntries(messageHistoryMap);
     const bcrypt = await import('bcryptjs');
 
@@ -149,6 +165,22 @@ export class StorageManager {
       }
       return copy;
     });
+
+    // 0. Always persist to local database.json as reliable snapshot
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      const dbPath = path.join(DATA_DIR, 'database.json');
+      fs.writeFileSync(dbPath, JSON.stringify({
+        users: safeUsers,
+        servers,
+        messageHistory: historyObj,
+        verificationRequests,
+        friendRequests,
+        updatedAt: new Date().toISOString()
+      }), 'utf8');
+    } catch (e) {
+      console.warn('[Storage] Local database.json write error:', e.message);
+    }
 
     // 1. Sync to Postgres (Prisma)
     if (this.prisma) {

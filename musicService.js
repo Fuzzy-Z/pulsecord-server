@@ -117,14 +117,69 @@ export function searchYtDlp(query, limit = 8) {
 // Layer 1: Metadata Extraction (Spotify, Apple Music, Deezer)
 // -------------------------------------------------------------
 
+/**
+ * SSRF Guard — only allow requests to a strict hostname allowlist.
+ * Blocks any private IP, localhost, cloud metadata endpoints, and
+ * any hostname not explicitly listed as trusted.
+ *
+ * @param {string} urlStr - The raw URL string to validate.
+ * @param {string[]} allowedHosts - Exact hostnames permitted for this call.
+ * @returns {boolean} true if safe to fetch, false otherwise.
+ */
+function isSafeUrl(urlStr, allowedHosts) {
+  try {
+    const parsed = new URL(urlStr);
+
+    // Protocol must be HTTPS (or HTTP for Deezer public API)
+    if (!['https:', 'http:'].includes(parsed.protocol)) return false;
+
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Block all private / loopback / link-local ranges via hostname literal
+    const BLOCKED_PATTERNS = [
+      /^localhost$/i,
+      /^127\./,
+      /^10\./,
+      /^172\.(1[6-9]|2[0-9]|3[01])\./,
+      /^192\.168\./,
+      /^169\.254\./,   // AWS/GCP/Azure metadata
+      /^::1$/,
+      /^0\.0\.0\.0$/,
+      /^fc[0-9a-f]{2}:/i,  // IPv6 unique local
+      /^fe80:/i,            // IPv6 link-local
+    ];
+    if (BLOCKED_PATTERNS.some((re) => re.test(hostname))) {
+      console.warn('[SSRF Guard] Blocked private/loopback hostname:', hostname);
+      return false;
+    }
+
+    // Strict hostname allowlist — must exactly match one of the permitted hosts
+    if (!allowedHosts.includes(hostname)) {
+      console.warn('[SSRF Guard] Hostname not in allowlist:', hostname);
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function parseSpotifyUrl(url) {
   try {
     const cleanUrl = (url || '').trim().split('?')[0];
 
+    // SSRF Guard: only allow requests to the official Spotify domain
+    if (!isSafeUrl(cleanUrl, ['open.spotify.com'])) {
+      console.warn('[MusicBot] parseSpotifyUrl blocked non-Spotify URL:', cleanUrl);
+      return null;
+    }
+
     // 1. Primary: Spotify Official oEmbed API (High precision, no API key required)
     try {
       const oembedRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(cleanUrl)}`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(8000)
       });
       if (oembedRes.ok) {
         const oembed = await oembedRes.json();
@@ -133,10 +188,11 @@ export async function parseSpotifyUrl(url) {
         const cover = oembed.thumbnail_url || '';
 
         // Extract artist from the lightweight iframe embed
-        if (oembed.iframe_url) {
+        if (oembed.iframe_url && isSafeUrl(oembed.iframe_url, ['open.spotify.com', 'embed.spotify.com'])) {
           try {
             const embRes = await fetch(oembed.iframe_url, {
-              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+              signal: AbortSignal.timeout(8000)
             });
             if (embRes.ok) {
               const embHtml = await embRes.text();
@@ -167,11 +223,12 @@ export async function parseSpotifyUrl(url) {
       console.warn('[MusicBot] Spotify oEmbed error:', oembedErr.message);
     }
 
-    // 2. Fallback: Direct HTML scraping
+    // 2. Fallback: Direct HTML scraping (still only for confirmed Spotify host)
     const res = await fetch(cleanUrl, {
       headers: {
         'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)'
-      }
+      },
+      signal: AbortSignal.timeout(8000)
     });
     if (!res.ok) return null;
     const html = await res.text();
@@ -205,12 +262,7 @@ export async function parseSpotifyUrl(url) {
     }
 
     const query = artist ? `${artist} - ${title}` : title;
-    return {
-      title,
-      artist,
-      cover,
-      query
-    };
+    return { title, artist, cover, query };
   } catch (err) {
     console.warn('[MusicBot] parseSpotifyUrl error:', err.message);
     return null;
@@ -220,8 +272,16 @@ export async function parseSpotifyUrl(url) {
 export async function parseAppleMusicUrl(url) {
   try {
     const cleanUrl = (url || '').trim().split('?')[0];
+
+    // SSRF Guard: only allow requests to the official Apple Music domain
+    if (!isSafeUrl(cleanUrl, ['music.apple.com'])) {
+      console.warn('[MusicBot] parseAppleMusicUrl blocked non-Apple URL:', cleanUrl);
+      return null;
+    }
+
     const res = await fetch(cleanUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(8000)
     });
     if (!res.ok) return null;
     const html = await res.text();
@@ -250,7 +310,16 @@ export async function parseAppleMusicUrl(url) {
 export async function parseDeezerUrl(url) {
   try {
     const cleanUrl = (url || '').trim().split('?')[0];
-    const res = await fetch(`https://api.deezer.com/oembed?url=${encodeURIComponent(cleanUrl)}`);
+
+    // SSRF Guard: only allow requests to the official Deezer domain
+    if (!isSafeUrl(cleanUrl, ['www.deezer.com', 'deezer.com'])) {
+      console.warn('[MusicBot] parseDeezerUrl blocked non-Deezer URL:', cleanUrl);
+      return null;
+    }
+
+    const res = await fetch(`https://api.deezer.com/oembed?url=${encodeURIComponent(cleanUrl)}`, {
+      signal: AbortSignal.timeout(8000)
+    });
     if (!res.ok) return null;
     const data = await res.json();
     const title = data.title || '';
@@ -459,7 +528,11 @@ class MusicBotManager {
     let sourcePlatform = 'search';
 
     // 2. Metadata Extraction Layer (Spotify / Apple Music / Deezer)
-    if (q.includes('open.spotify.com/')) {
+    // Use new URL() for hostname validation — never rely on .includes() for security checks
+    let qHostname = '';
+    try { qHostname = new URL(q).hostname.toLowerCase(); } catch {}
+
+    if (qHostname === 'open.spotify.com') {
       sourcePlatform = 'spotify';
       try {
         const spotifyData = await parseSpotifyUrl(q);
@@ -472,7 +545,7 @@ class MusicBotManager {
       } catch (err) {
         console.warn('[MusicBot] Spotify parse error:', err.message);
       }
-    } else if (q.includes('music.apple.com/')) {
+    } else if (qHostname === 'music.apple.com') {
       sourcePlatform = 'apple';
       try {
         const appleData = await parseAppleMusicUrl(q);
@@ -485,7 +558,7 @@ class MusicBotManager {
       } catch (err) {
         console.warn('[MusicBot] Apple Music parse error:', err.message);
       }
-    } else if (q.includes('deezer.com/')) {
+    } else if (qHostname === 'www.deezer.com' || qHostname === 'deezer.com') {
       sourcePlatform = 'deezer';
       try {
         const deezerData = await parseDeezerUrl(q);
@@ -498,7 +571,7 @@ class MusicBotManager {
       } catch (err) {
         console.warn('[MusicBot] Deezer parse error:', err.message);
       }
-    } else if (q.includes('youtube.com/') || q.includes('youtu.be/')) {
+    } else if (qHostname === 'www.youtube.com' || qHostname === 'youtube.com' || qHostname === 'youtu.be') {
       sourcePlatform = 'youtube';
       try {
         const ytTrack = await resolveYtDlp(q);
