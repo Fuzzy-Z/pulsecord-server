@@ -2807,8 +2807,21 @@ export async function setupSignaling(io, app = null) {
         if (typeof isScreenSharing === 'boolean') user.isScreenSharing = isScreenSharing;
 
         if (user.activeVoiceChannel) {
+          const room = voiceRooms.get(user.activeVoiceChannel);
+          if (room) {
+            const member = room.find((m) => m.socketId === socket.id || m.id === user.id);
+            if (member) {
+              if (typeof isMuted === 'boolean') member.isMuted = isMuted;
+              if (typeof isDeafened === 'boolean') member.isDeafened = isDeafened;
+              if (typeof isScreenSharing === 'boolean') member.isScreenSharing = isScreenSharing;
+            }
+          }
+
           io.to(`voice-${user.activeVoiceChannel}`).emit('user-voice-status-updated', {
-            user
+            user: {
+              ...user,
+              socketId: socket.id
+            }
           });
         }
         io.emit('voice-rooms-updated', {
