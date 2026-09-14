@@ -126,13 +126,21 @@ export class StorageManager {
               ...existing,
               ...s,
               channels: s.channels?.length ? s.channels : (existing.channels || []),
-              roles: s.roles?.length ? s.roles.map(r => ({ ...r, permissions: JSON.parse(r.permissions || '{}') })) : (existing.roles || []),
+              roles: s.roles?.length ? s.roles.map(r => ({
+                ...r,
+                permissions: typeof r.permissions === 'object' && r.permissions !== null
+                  ? r.permissions
+                  : (() => { try { return JSON.parse(r.permissions || '{}'); } catch (_) { return {}; } })()
+              })) : (existing.roles || []),
               memberIds: s.members?.length ? s.members.map(m => m.userId) : (existing.memberIds || []),
-              memberRoles: existing.memberRoles || {}
+              memberRoles: existing.memberRoles || {},
+              members: Array.isArray(existing.members) ? existing.members : []
             };
-            if (s.members) {
+            if (s.members && Array.isArray(s.members)) {
               s.members.forEach(m => {
-                srv.memberRoles[m.userId] = m.roleId;
+                if (m && m.userId) {
+                  srv.memberRoles[m.userId] = m.roleId;
+                }
               });
             }
             serverMap.set(s.id, srv);
@@ -190,8 +198,14 @@ export class StorageManager {
     };
   }
 
-  async saveData(users, servers, messageHistoryMap, verificationRequests = [], friendRequests = []) {
-    const historyObj = Object.fromEntries(messageHistoryMap);
+  async saveData(users = [], servers = [], messageHistoryMap = new Map(), verificationRequests = [], friendRequests = []) {
+    let historyObj = {};
+    if (messageHistoryMap instanceof Map) {
+      historyObj = Object.fromEntries(messageHistoryMap);
+    } else if (messageHistoryMap && typeof messageHistoryMap === 'object') {
+      historyObj = messageHistoryMap;
+    }
+
     const bcrypt = await import('bcryptjs');
 
     // Cryptographically protect stored passwords using native bcrypt
@@ -358,9 +372,11 @@ export class StorageManager {
         }
 
         // Sync Messages (Only for channels registered in PostgreSQL to prevent FK violations)
-        for (const [channelId, messages] of messageHistoryMap.entries()) {
+        for (const [channelId, messages] of Object.entries(historyObj)) {
           if (!validChannelIds.has(channelId)) continue; // Keep DM messages in disk snapshot
+          if (!Array.isArray(messages)) continue;
           for (const msg of messages) {
+            if (!msg || !msg.id) continue;
             try {
               const authorId = msg.author?.id || msg.authorId || 'usr-default';
               await this.prisma.message.upsert({

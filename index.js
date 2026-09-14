@@ -354,8 +354,17 @@ if (fs.existsSync(DIST_PATH)) {
   });
 }
 
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT EXCEPTION]', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[UNHANDLED REJECTION]', reason);
+});
+
 // Initialize Socket.io signaling & music bot & Admin REST API
-setupSignaling(io, app);
+setupSignaling(io, app).catch((err) => {
+  console.error('[Signaling Init Error]:', err);
+});
 
 const PORT = process.env.PORT || 4000;
 let isListening = false;

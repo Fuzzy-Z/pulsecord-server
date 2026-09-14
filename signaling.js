@@ -546,35 +546,7 @@ export async function setupSignaling(io, app = null) {
   // In-memory DM Conversations: dmId -> { id, participants: [userId1, userId2], updatedAt }
   const dmConversations = new Map();
 
-  // Permanent Chat History Retention (Preserves pinned and up to 1000 messages per channel in memory)
-  const pruneOldMessages = () => {
-    const MAX_MESSAGES_PER_CHANNEL = 1000;
-    let prunedMessagesCount = 0;
 
-    for (const [channelId, msgs] of messageHistory.entries()) {
-      if (Array.isArray(msgs) && msgs.length > MAX_MESSAGES_PER_CHANNEL) {
-        const pinned = msgs.filter((m) => m.isPinned || m.pinned);
-        const unpinned = msgs.filter((m) => !m.isPinned && !m.pinned);
-        const keepCount = Math.max(0, MAX_MESSAGES_PER_CHANNEL - pinned.length);
-        const keptUnpinned = unpinned.slice(-keepCount);
-        const remaining = [...pinned, ...keptUnpinned].sort(
-          (a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0)
-        );
-
-        prunedMessagesCount += msgs.length - remaining.length;
-        messageHistory.set(channelId, remaining);
-      }
-    }
-
-    if (prunedMessagesCount > 0) {
-      console.log(`[Lifecycle] Retained latest message limit (trimmed ${prunedMessagesCount} older messages).`);
-      storage.saveData(registeredUsers, servers, messageHistory);
-      io.emit('messages-pruned');
-    }
-  };
-
-  // Run routine every 5 minutes
-  setInterval(pruneOldMessages, 5 * 60 * 1000);
 
   // Self-healing: Periodic voice rooms integrity check & ghost cleanup (every 5 seconds)
   setInterval(() => {
