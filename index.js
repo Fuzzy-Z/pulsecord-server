@@ -305,19 +305,23 @@ app.delete('/api/feedback/:id', (req, res) => {
 const GITHUB_CDN_ASAR = 'https://raw.githubusercontent.com/Fuzzy-Z/pulsecord-server/main/app.asar';
 
 app.get('/api/version', (req, res) => {
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.get('host') || 'app.voxelchat.com.br';
+  const directAsarUrl = `${protocol}://${host}/api/update/app.asar`;
+
   if (fs.existsSync(VERSION_FILE)) {
     try {
       const data = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'));
       data.hasAsar = true;
-      data.asarUrl = GITHUB_CDN_ASAR;
+      data.asarUrl = directAsarUrl;
       return res.json(data);
     } catch (e) {}
   }
   res.json({
-    version: '1.0.43',
+    version: '1.0.107',
     releaseDate: new Date().toISOString(),
     hasAsar: true,
-    asarUrl: GITHUB_CDN_ASAR,
+    asarUrl: directAsarUrl,
     notes: 'Atualização com melhorias de voz e estabilidade no Voxel.'
   });
 });
@@ -333,11 +337,11 @@ app.get('/api/update/app.asar', (req, res) => {
 });
 
 // Official Windows Installer Setup direct download endpoint
-app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.98.exe', '/download/Voxel-Setup-1.0.101.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
+app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.107.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
   const localSetup = path.join(__dirname, 'Voxel-Setup.exe');
   if (fs.existsSync(localSetup)) {
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.105.exe"');
+    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.107.exe"');
     return res.sendFile(localSetup);
   }
   res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.105/Voxel-Setup-1.0.105.exe');
