@@ -2664,6 +2664,10 @@ export async function setupSignaling(io, app = null) {
       io.emit('voice-rooms-updated', {
         voiceRooms: Object.fromEntries(voiceRooms)
       });
+
+      io.emit('user-status-changed', {
+        user: { ...user, activeVoiceChannel: channelId }
+      });
     });
 
     socket.on('leave-voice', () => {
@@ -3226,6 +3230,12 @@ function leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets) {
   io.emit('voice-rooms-updated', {
     voiceRooms: Object.fromEntries(voiceRooms)
   });
+
+  if (user) {
+    io.emit('user-status-changed', {
+      user: { ...user, activeVoiceChannel: null }
+    });
+  }
 }
 
 async function handleBotCommand(channelId, content, user, io, musicBot, messageHistory, storage, servers, registeredUsers) {
