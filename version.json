@@ -1,8 +1,8 @@
 {
-  "version": "1.0.111",
-  "releaseDate": "2026-09-17T18:15:36.535Z",
-  "notes": "Correção do atualizador do Voxel na versão v1.0.111.",
+  "version": "1.0.112",
+  "releaseDate": "2026-09-17T19:41:39.973Z",
+  "notes": "Atualizador sem janelas de terminal na versão v1.0.112.",
   "hasAsar": true,
-  "size": 37487007,
-  "sha256": "d5210f3bdf3d2edcaa5f91ec268f91d7aeccbaabb1d0fe2c57b78c28b6f7d644"
+  "size": 37487314,
+  "sha256": "4bf9bdd39c299afed21b111d95f72d0fc1407d18c2d78203af705c31dafe860e"
 }

@@ -380,14 +380,14 @@ app.get(['/download/linux/tar', '/download/linux/tar.gz', '/download/linux/Voxel
 });
 
 // Official Windows Installer Setup direct download endpoint
-app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.111.exe', '/download/Voxel-Setup-1.0.110.exe', '/download/Voxel-Setup-1.0.109.exe', '/download/Voxel-Setup-1.0.107.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
+app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.112.exe', '/download/Voxel-Setup-1.0.111.exe', '/download/Voxel-Setup-1.0.110.exe', '/download/Voxel-Setup-1.0.109.exe', '/download/Voxel-Setup-1.0.107.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
   const localSetup = path.join(__dirname, 'Voxel-Setup.exe');
   if (fs.existsSync(localSetup)) {
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.111.exe"');
+    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.112.exe"');
     return res.sendFile(localSetup);
   }
-  res.status(503).send('Instalador Voxel v1.0.111 temporariamente indisponível.');
+  res.status(503).send('Instalador Voxel v1.0.112 temporariamente indisponível.');
 });
 
 // SPA fallback for web browser access
