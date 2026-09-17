@@ -2782,13 +2782,15 @@ export async function setupSignaling(io, app = null) {
 
     socket.on('webrtc-offer', ({ targetSocketId, offer, isScreenShare }) => {
       const sender = activeSockets.get(socket.id);
-      if (!sender || !sender.activeVoiceChannel) return;
+      if (!sender) return;
 
       const target = activeSockets.get(targetSocketId);
-      if (!target || !target.activeVoiceChannel) return;
+      if (!target) return;
 
-      // Both sockets must belong to the exact same active voice channel
-      if (sender.activeVoiceChannel !== target.activeVoiceChannel) return;
+      // Ensure both belong to the same voice channel if defined
+      if (sender.activeVoiceChannel && target.activeVoiceChannel) {
+        if (String(sender.activeVoiceChannel) !== String(target.activeVoiceChannel)) return;
+      }
 
       io.to(targetSocketId).emit('webrtc-offer', {
         senderSocketId: socket.id,
@@ -2800,12 +2802,14 @@ export async function setupSignaling(io, app = null) {
 
     socket.on('webrtc-answer', ({ targetSocketId, answer, isScreenShare }) => {
       const sender = activeSockets.get(socket.id);
-      if (!sender || !sender.activeVoiceChannel) return;
+      if (!sender) return;
 
       const target = activeSockets.get(targetSocketId);
-      if (!target || !target.activeVoiceChannel) return;
+      if (!target) return;
 
-      if (sender.activeVoiceChannel !== target.activeVoiceChannel) return;
+      if (sender.activeVoiceChannel && target.activeVoiceChannel) {
+        if (String(sender.activeVoiceChannel) !== String(target.activeVoiceChannel)) return;
+      }
 
       io.to(targetSocketId).emit('webrtc-answer', {
         senderSocketId: socket.id,
@@ -2816,12 +2820,14 @@ export async function setupSignaling(io, app = null) {
 
     socket.on('webrtc-ice-candidate', ({ targetSocketId, candidate, isScreenShare }) => {
       const sender = activeSockets.get(socket.id);
-      if (!sender || !sender.activeVoiceChannel) return;
+      if (!sender) return;
 
       const target = activeSockets.get(targetSocketId);
-      if (!target || !target.activeVoiceChannel) return;
+      if (!target) return;
 
-      if (sender.activeVoiceChannel !== target.activeVoiceChannel) return;
+      if (sender.activeVoiceChannel && target.activeVoiceChannel) {
+        if (String(sender.activeVoiceChannel) !== String(target.activeVoiceChannel)) return;
+      }
 
       io.to(targetSocketId).emit('webrtc-ice-candidate', {
         senderSocketId: socket.id,
