@@ -317,12 +317,18 @@ app.get('/api/version', (req, res) => {
       return res.json(data);
     } catch (e) {}
   }
+  let fallbackVer = '1.0.109';
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8'));
+    if (pkg.version) fallbackVer = pkg.version;
+  } catch (e) {}
+
   res.json({
-    version: '1.0.107',
+    version: fallbackVer,
     releaseDate: new Date().toISOString(),
     hasAsar: true,
     asarUrl: directAsarUrl,
-    notes: 'Atualização com melhorias de voz e estabilidade no Voxel.'
+    notes: `Atualização v${fallbackVer} com melhorias no Voxel.`
   });
 });
 
