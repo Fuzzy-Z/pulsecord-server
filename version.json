@@ -1,8 +1,8 @@
 {
-  "version": "1.0.113",
-  "releaseDate": "2026-09-17T19:55:19.166Z",
-  "notes": "Reconexão automática à chamada após reinício do servidor na versão v1.0.113.",
+  "version": "1.0.114",
+  "releaseDate": "2026-09-17T20:08:15.516Z",
+  "notes": "Foto personalizada para identificar servidores na versão v1.0.114.",
   "hasAsar": true,
-  "size": 37488974,
-  "sha256": "80e2e80c263c2c3a66fce92b99d3d74e6534fa7acf87346741a0c4fbcc7964ff"
+  "size": 37496656,
+  "sha256": "f72be95ac4db7d0f2f0ae3936b3296abdd7c10bd009952ff4101692755ad1934"
 }
