@@ -317,7 +317,7 @@ app.get('/api/version', (req, res) => {
       return res.json(data);
     } catch (e) {}
   }
-  let fallbackVer = '1.0.109';
+  let fallbackVer = '1.0.110';
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8'));
     if (pkg.version) fallbackVer = pkg.version;
@@ -343,14 +343,14 @@ app.get('/api/update/app.asar', (req, res) => {
 });
 
 // Official Windows Installer Setup direct download endpoint
-app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.109.exe', '/download/Voxel-Setup-1.0.107.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
+app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.110.exe', '/download/Voxel-Setup-1.0.109.exe', '/download/Voxel-Setup-1.0.107.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
   const localSetup = path.join(__dirname, 'Voxel-Setup.exe');
   if (fs.existsSync(localSetup)) {
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.109.exe"');
+    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-Setup-1.0.110.exe"');
     return res.sendFile(localSetup);
   }
-  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.109/Voxel-Setup-1.0.109.exe');
+  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.110/Voxel-Setup-1.0.110.exe');
 });
 
 // SPA fallback for web browser access
