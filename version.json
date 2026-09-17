@@ -1,8 +1,8 @@
 {
-  "version": "1.0.114",
-  "releaseDate": "2026-09-17T20:08:15.516Z",
-  "notes": "Foto personalizada para identificar servidores na versão v1.0.114.",
+  "version": "1.0.115",
+  "releaseDate": "2026-09-17T20:23:52.350Z",
+  "notes": "Foto personalizada para identificar servidores na versão v1.0.115.",
   "hasAsar": true,
-  "size": 37496656,
-  "sha256": "f72be95ac4db7d0f2f0ae3936b3296abdd7c10bd009952ff4101692755ad1934"
+  "size": 37498019,
+  "sha256": "3452d38b124ab32634f65085d0019b30feeb07c30ec4516ef1cd3d89980aaa48"
 }
