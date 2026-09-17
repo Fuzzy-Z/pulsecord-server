@@ -769,204 +769,268 @@ export async function setupSignaling(io, app = null) {
       }
     });
 
-    // Register New Account (Step 1: Validate, generate 6-digit OTP, send email via Resend)
+    // Register with Email & Password (Step 1: generates 6-digit OTP code)
     socket.on('auth-register', async ({ email, password, username, avatar, avatarColor }, callback) => {
-      const normEmail = (email || '').trim().toLowerCase();
-      const rawPassword = (password || '').trim();
+      try {
+        const normEmail = (email || '').trim().toLowerCase();
+        const rawPassword = (password || '').trim();
 
-      if (!normEmail || !rawPassword) {
-        return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
-      }
-
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail)) {
-        return callback && callback({ success: false, error: 'Formato de e-mail inválido.' });
-      }
-
-      if (rawPassword.length < 6) {
-        return callback && callback({ success: false, error: 'A senha deve conter no mínimo 6 caracteres.' });
-      }
-
-      // Check email uniqueness
-      if (registeredUsers.some((u) => (u.email || '').trim().toLowerCase() === normEmail)) {
-        return callback && callback({ success: false, error: 'Este e-mail já está cadastrado no Voxel.' });
-      }
-
-      const rawUsername = (username || normEmail.split('@')[0]).trim();
-      const cleanUsername = rawUsername.replace(/^@/, '');
-
-      // Check username validation & uniqueness (exact match)
-      if (cleanUsername.length < 2 || cleanUsername.length > 32) {
-        return callback && callback({ success: false, error: 'O nome de usuário deve ter entre 2 e 32 caracteres.' });
-      }
-
-      if (!/^[a-zA-Z0-9_.-]+$/.test(cleanUsername)) {
-        return callback && callback({ success: false, error: 'O nome de usuário só pode conter letras, números, sublinhado (_), hífen (-) e ponto (.).' });
-      }
-
-      if (registeredUsers.some((u) => (u.username || '').trim() === cleanUsername)) {
-        return callback && callback({ success: false, error: 'Este nome de usuário exato já está sendo utilizado. Por favor, escolha outro.' });
-      }
-
-      const cleanAvatar = (avatar || cleanUsername).substring(0, 2).toUpperCase();
-      const hashedPassword = await hashPassword(rawPassword);
-
-      // Generate 6-digit OTP code
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
-
-      // Store pending verification for 15 minutes
-      pendingVerifications.set(normEmail, {
-        code,
-        expiresAt: Date.now() + 15 * 60 * 1000,
-        lastSentAt: Date.now(),
-        userData: {
-          email: normEmail,
-          password: hashedPassword,
-          username: cleanUsername,
-          avatar: cleanAvatar,
-          avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
-          displayName: cleanUsername
+        if (!normEmail || !rawPassword) {
+          return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
         }
-      });
 
-      // Send verification email via Resend
-      const sendRes = await sendVerificationEmail(normEmail, code, cleanUsername);
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normEmail)) {
+          return callback && callback({ success: false, error: 'Formato de e-mail inválido.' });
+        }
 
-      return callback && callback({
-        success: true,
-        pendingVerification: true,
-        email: normEmail,
-        devCode: sendRes.domainUnverified ? code : undefined,
-        warning: sendRes.success ? undefined : sendRes.error
-      });
+        if (rawPassword.length < 6) {
+          return callback && callback({ success: false, error: 'A senha deve conter no mínimo 6 caracteres.' });
+        }
+
+        // Check email uniqueness
+        if (registeredUsers.some((u) => (u.email || '').trim().toLowerCase() === normEmail)) {
+          return callback && callback({ success: false, error: 'Este e-mail já está cadastrado no Voxel. Clique na aba "Entrar" para acessar.' });
+        }
+
+        const rawUsername = (username || normEmail.split('@')[0]).trim();
+        const cleanUsername = rawUsername.replace(/^@/, '');
+
+        // Check username validation & uniqueness (exact match)
+        if (cleanUsername.length < 2 || cleanUsername.length > 32) {
+          return callback && callback({ success: false, error: 'O nome de usuário deve ter entre 2 e 32 caracteres.' });
+        }
+
+        if (!/^[a-zA-Z0-9_.-]+$/.test(cleanUsername)) {
+          return callback && callback({ success: false, error: 'O nome de usuário só pode conter letras, números, sublinhado (_), hífen (-) e ponto (.).' });
+        }
+
+        if (registeredUsers.some((u) => (u.username || '').trim() === cleanUsername)) {
+          return callback && callback({ success: false, error: 'Este nome de usuário exato já está sendo utilizado. Por favor, escolha outro.' });
+        }
+
+        const cleanAvatar = (avatar || cleanUsername).substring(0, 2).toUpperCase();
+        const hashedPassword = await hashPassword(rawPassword);
+
+        // Generate 6-digit OTP code
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Store pending verification for 15 minutes
+        pendingVerifications.set(normEmail, {
+          code,
+          expiresAt: Date.now() + 15 * 60 * 1000,
+          lastSentAt: Date.now(),
+          userData: {
+            email: normEmail,
+            password: hashedPassword,
+            username: cleanUsername,
+            avatar: cleanAvatar,
+            avatarColor: avatarColor || 'from-indigo-500 to-purple-600',
+            displayName: cleanUsername
+          }
+        });
+
+        // Send verification email via Resend
+        const sendRes = await sendVerificationEmail(normEmail, code, cleanUsername);
+
+        return callback && callback({
+          success: true,
+          pendingVerification: true,
+          email: normEmail,
+          devCode: sendRes.domainUnverified ? code : undefined,
+          warning: sendRes.success ? undefined : sendRes.error
+        });
+      } catch (err) {
+        console.error('[Auth] Error in auth-register:', err);
+        return callback && callback({ success: false, error: 'Erro ao iniciar cadastro. Tente novamente.' });
+      }
     });
 
     // Verify 6-digit OTP Email Code (Step 2: finalize registration & log in)
     socket.on('auth-verify-email', async ({ email, code }, callback) => {
-      const normEmail = (email || '').trim().toLowerCase();
-      const inputCode = (code || '').trim();
+      try {
+        const normEmail = (email || '').trim().toLowerCase();
+        const inputCode = (code || '').trim();
+        console.log(`[Auth] verify-email request for: ${normEmail}, code: ${inputCode}`);
 
-      if (!normEmail || !inputCode) {
-        return callback && callback({ success: false, error: 'E-mail e código de verificação são obrigatórios.' });
-      }
-
-      const pending = pendingVerifications.get(normEmail);
-      if (!pending) {
-        return callback && callback({ success: false, error: 'Nenhuma verificação pendente para este e-mail. Crie uma conta primeiro.' });
-      }
-
-      if (Date.now() > pending.expiresAt) {
-        pendingVerifications.delete(normEmail);
-        return callback && callback({ success: false, error: 'O código de verificação expirou. Solicite um novo código.' });
-      }
-
-      if (pending.code !== inputCode) {
-        return callback && callback({ success: false, error: 'Código de verificação incorreto. Tente novamente.' });
-      }
-
-      // Check if email or username was registered in the meantime
-      if (registeredUsers.some((u) => (u.email || '').trim().toLowerCase() === normEmail)) {
-        pendingVerifications.delete(normEmail);
-        return callback && callback({ success: false, error: 'Este e-mail já foi registrado.' });
-      }
-
-      if (registeredUsers.some((u) => (u.username || '').trim() === pending.userData.username)) {
-        pendingVerifications.delete(normEmail);
-        return callback && callback({ success: false, error: 'Este nome de usuário foi registrado por outra conta. Escolha outro.' });
-      }
-
-      const newUser = {
-        id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        email: pending.userData.email,
-        password: pending.userData.password,
-        username: pending.userData.username,
-        avatar: pending.userData.avatar,
-        avatarColor: pending.userData.avatarColor,
-        token: '',
-        createdAt: new Date().toISOString(),
-        serverIds: ['server-1'],
-        bio: '',
-        pronouns: '',
-        displayName: pending.userData.displayName,
-        customStatus: { text: '', emoji: '' },
-        gameStatus: '',
-        badges: [],
-        avatarUrl: '',
-        bannerUrl: '',
-        avatarDecoration: '',
-        profileEffect: ''
-      };
-
-      newUser.token = signUserToken(newUser);
-      registeredUsers.push(newUser);
-
-      // Add to default community server
-      const defaultServer = servers.find((s) => s.id === 'server-1');
-      if (defaultServer) {
-        if (!defaultServer.memberIds) defaultServer.memberIds = [];
-        if (!defaultServer.memberIds.includes(newUser.id)) {
-          defaultServer.memberIds.push(newUser.id);
+        if (!normEmail || !inputCode) {
+          return callback && callback({ success: false, error: 'E-mail e código de verificação são obrigatórios.' });
         }
+
+        // Case 1: User is ALREADY registered in the database! (e.g. registered on another device or prior session)
+        const existingUser = registeredUsers.find((u) => (u.email || '').trim().toLowerCase() === normEmail);
+        if (existingUser) {
+          console.log(`[Auth] User ${normEmail} is already registered. Logging in directly!`);
+          existingUser.token = signUserToken(existingUser);
+
+          // Clean up any stale sockets for this user ID
+          for (const [oldSockId, oldUser] of activeSockets.entries()) {
+            if (oldUser.id === existingUser.id && oldSockId !== socket.id) {
+              const oldSock = io.sockets.sockets.get(oldSockId);
+              if (!oldSock || !oldSock.connected) {
+                activeSockets.delete(oldSockId);
+              }
+            }
+          }
+
+          cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-verify-email');
+
+          const activeUser = {
+            ...existingUser,
+            socketId: socket.id,
+            status: 'online',
+            isMuted: false,
+            isDeafened: false,
+            isScreenSharing: false,
+            activeVoiceChannel: null
+          };
+          activeSockets.set(socket.id, activeUser);
+          pendingVerifications.delete(normEmail);
+
+          const userServers = getServersForUser(existingUser.id);
+
+          if (callback) {
+            callback({
+              success: true,
+              user: {
+                ...existingUser,
+                password: undefined
+              },
+              servers: userServers,
+              voiceRooms: Object.fromEntries(voiceRooms)
+            });
+          }
+
+          io.emit('user-status-changed', { user: activeUser });
+          return;
+        }
+
+        // Case 2: New user verification via pending OTP
+        const pending = pendingVerifications.get(normEmail);
+        if (!pending) {
+          return callback && callback({ success: false, error: 'Nenhuma verificação pendente para este e-mail. Crie uma conta primeiro.' });
+        }
+
+        if (Date.now() > pending.expiresAt) {
+          pendingVerifications.delete(normEmail);
+          return callback && callback({ success: false, error: 'O código de verificação expirou. Solicite um novo código.' });
+        }
+
+        if (pending.code !== inputCode) {
+          return callback && callback({ success: false, error: 'Código de verificação incorreto. Tente novamente.' });
+        }
+
+        if (registeredUsers.some((u) => (u.username || '').trim() === pending.userData.username)) {
+          pendingVerifications.delete(normEmail);
+          return callback && callback({ success: false, error: 'Este nome de usuário foi registrado por outra conta. Escolha outro.' });
+        }
+
+        const newUser = {
+          id: `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          email: pending.userData.email,
+          password: pending.userData.password,
+          username: pending.userData.username,
+          avatar: pending.userData.avatar,
+          avatarColor: pending.userData.avatarColor,
+          token: '',
+          createdAt: new Date().toISOString(),
+          serverIds: ['server-1'],
+          bio: '',
+          pronouns: '',
+          displayName: pending.userData.displayName,
+          customStatus: { text: '', emoji: '' },
+          gameStatus: '',
+          badges: [],
+          avatarUrl: '',
+          bannerUrl: '',
+          avatarDecoration: '',
+          profileEffect: ''
+        };
+
+        newUser.token = signUserToken(newUser);
+        registeredUsers.push(newUser);
+
+        // Add to default community server
+        const defaultServer = servers.find((s) => s.id === 'server-1');
+        if (defaultServer) {
+          if (!defaultServer.memberIds) defaultServer.memberIds = [];
+          if (!defaultServer.memberIds.includes(newUser.id)) {
+            defaultServer.memberIds.push(newUser.id);
+          }
+        }
+
+        storage.saveData(registeredUsers, servers, messageHistory);
+        pendingVerifications.delete(normEmail);
+
+        // Activate session for this socket
+        const activeUser = {
+          ...newUser,
+          socketId: socket.id,
+          status: 'online',
+          isMuted: false,
+          isDeafened: false,
+          isScreenSharing: false,
+          activeVoiceChannel: null
+        };
+        activeSockets.set(socket.id, activeUser);
+
+        const userServers = getServersForUser(newUser.id);
+
+        if (callback) {
+          callback({
+            success: true,
+            user: {
+              ...newUser,
+              password: undefined
+            },
+            servers: userServers,
+            voiceRooms: Object.fromEntries(voiceRooms)
+          });
+        }
+
+        io.emit('user-status-changed', { user: activeUser });
+      } catch (err) {
+        console.error('[Auth] Error in auth-verify-email:', err);
+        return callback && callback({ success: false, error: 'Erro ao verificar código no servidor.' });
       }
-
-      storage.saveData(registeredUsers, servers, messageHistory);
-      pendingVerifications.delete(normEmail);
-
-      // Activate session for this socket
-      const activeUser = {
-        ...newUser,
-        socketId: socket.id,
-        status: 'online',
-        isMuted: false,
-        isDeafened: false,
-        isScreenSharing: false,
-        activeVoiceChannel: null
-      };
-      activeSockets.set(socket.id, activeUser);
-
-      const userServers = getServersForUser(newUser.id);
-
-      if (callback) {
-        callback({
-          success: true,
-          user: {
-            ...newUser,
-            password: undefined
-          },
-          servers: userServers,
-          voiceRooms: Object.fromEntries(voiceRooms)
-        });
-      }
-
-      io.emit('user-status-changed', { user: activeUser });
     });
 
     // Resend 6-digit OTP Code
     socket.on('auth-resend-code', async ({ email }, callback) => {
-      const normEmail = (email || '').trim().toLowerCase();
-      const pending = pendingVerifications.get(normEmail);
+      try {
+        const normEmail = (email || '').trim().toLowerCase();
 
-      if (!pending) {
-        return callback && callback({ success: false, error: 'Nenhum cadastro pendente para este e-mail.' });
+        // If already registered, notify user to log in
+        if (registeredUsers.some((u) => (u.email || '').trim().toLowerCase() === normEmail)) {
+          return callback && callback({ success: false, error: 'Sua conta já está ativada! Clique em "Entrar" com seu e-mail e senha.' });
+        }
+
+        const pending = pendingVerifications.get(normEmail);
+        if (!pending) {
+          return callback && callback({ success: false, error: 'Nenhum cadastro pendente para este e-mail.' });
+        }
+
+        const now = Date.now();
+        if (pending.lastSentAt && now - pending.lastSentAt < 30000) {
+          const remainingSeconds = Math.ceil((30000 - (now - pending.lastSentAt)) / 1000);
+          return callback && callback({ success: false, error: `Aguarde ${remainingSeconds}s antes de solicitar um novo código.` });
+        }
+
+        const newCode = Math.floor(100000 + Math.random() * 900000).toString();
+        pending.code = newCode;
+        pending.expiresAt = now + 15 * 60 * 1000;
+        pending.lastSentAt = now;
+
+        const sendRes = await sendVerificationEmail(normEmail, newCode, pending.userData.username);
+        return callback && callback({
+          success: true,
+          message: 'Novo código de verificação enviado!',
+          devCode: sendRes.domainUnverified ? newCode : undefined,
+          warning: sendRes.success ? undefined : sendRes.error
+        });
+      } catch (err) {
+        console.error('[Auth] Error in auth-resend-code:', err);
+        return callback && callback({ success: false, error: 'Erro ao reenviar código.' });
       }
-
-      const now = Date.now();
-      if (pending.lastSentAt && now - pending.lastSentAt < 30000) {
-        const remainingSeconds = Math.ceil((30000 - (now - pending.lastSentAt)) / 1000);
-        return callback && callback({ success: false, error: `Aguarde ${remainingSeconds}s antes de solicitar um novo código.` });
-      }
-
-      const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-      pending.code = newCode;
-      pending.expiresAt = now + 15 * 60 * 1000;
-      pending.lastSentAt = now;
-
-      const sendRes = await sendVerificationEmail(normEmail, newCode, pending.userData.username);
-      return callback && callback({
-        success: true,
-        message: 'Novo código de verificação enviado!',
-        devCode: sendRes.domainUnverified ? newCode : undefined,
-        warning: sendRes.success ? undefined : sendRes.error
-      });
     });
 
     // Quick Guest Entry (Deprecating: quick guest access discontinued)
@@ -981,136 +1045,145 @@ export async function setupSignaling(io, app = null) {
 
     // Login with Email & Password (bcrypt check & JWT issuance)
     socket.on('auth-login', async ({ email, password }, callback) => {
-      const normEmail = (email || '').trim().toLowerCase();
-      const rawPassword = (password || '').trim();
+      try {
+        const normEmail = (email || '').trim().toLowerCase();
+        const rawPassword = (password || '').trim();
+        console.log(`[Auth] Login attempt for: ${normEmail}`);
 
-      if (!normEmail || !rawPassword) {
-        return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
-      }
+        if (!normEmail || !rawPassword) {
+          return callback && callback({ success: false, error: 'E-mail e senha são obrigatórios.' });
+        }
 
-      const user = registeredUsers.find((u) => u.email === normEmail);
-      if (!user) {
-        return callback && callback({ success: false, error: 'E-mail ou senha incorretos.' });
-      }
+        const user = registeredUsers.find((u) => (u.email || '').trim().toLowerCase() === normEmail);
+        if (!user) {
+          console.warn(`[Auth] Login user not found: ${normEmail}`);
+          return callback && callback({ success: false, error: 'E-mail ou senha incorretos.' });
+        }
 
-      const { match, needsRehash } = await verifyPassword(rawPassword, user.password);
-      if (!match) {
-        return callback && callback({ success: false, error: 'E-mail ou senha incorretos.' });
-      }
+        const { match, needsRehash } = await verifyPassword(rawPassword, user.password);
+        if (!match) {
+          console.warn(`[Auth] Login password mismatch for: ${normEmail}`);
+          return callback && callback({ success: false, error: 'E-mail ou senha incorretos.' });
+        }
 
-      // Upgrade plain password to bcrypt hash if needed
-      if (needsRehash) {
-        user.password = await hashPassword(rawPassword);
-        storage.saveData(registeredUsers, servers, messageHistory);
-      }
-
-      // Issue signed JWT token
-      user.token = signUserToken(user);
-
-      // Clean up any stale sockets for this user ID
-      for (const [oldSockId, oldUser] of activeSockets.entries()) {
-        if (oldUser.id === user.id && oldSockId !== socket.id) {
-          const oldSock = io.sockets.sockets.get(oldSockId);
-          if (!oldSock || !oldSock.connected) {
-            activeSockets.delete(oldSockId);
+        // Upgrade plain password to bcrypt hash if needed
+        if (needsRehash) {
+          try {
+            user.password = await hashPassword(rawPassword);
+            storage.saveData(registeredUsers, servers, messageHistory);
+          } catch (e) {
+            console.warn('[Auth] Error rehashing password:', e.message);
           }
         }
+
+        // Issue signed JWT token
+        user.token = signUserToken(user);
+
+        // Clean up any stale sockets for this user ID
+        for (const [oldSockId, oldUser] of activeSockets.entries()) {
+          if (oldUser.id === user.id && oldSockId !== socket.id) {
+            const oldSock = io.sockets.sockets.get(oldSockId);
+            if (!oldSock || !oldSock.connected) {
+              activeSockets.delete(oldSockId);
+            }
+          }
+        }
+
+        cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-login');
+
+        const activeUser = {
+          ...user,
+          socketId: socket.id,
+          status: user.status || 'online',
+          isMuted: false,
+          isDeafened: false,
+          isScreenSharing: false,
+          activeVoiceChannel: null
+        };
+        activeSockets.set(socket.id, activeUser);
+
+        const userServers = getServersForUser(user.id);
+        console.log(`[Auth] Login SUCCESS for: ${normEmail} (${user.username})`);
+
+        if (callback) {
+          callback({
+            success: true,
+            user: {
+              ...user,
+              password: undefined
+            },
+            servers: userServers,
+            voiceRooms: Object.fromEntries(voiceRooms)
+          });
+        }
+
+        io.emit('user-status-changed', { user: activeUser });
+      } catch (err) {
+        console.error('[Auth] Error in auth-login:', err);
+        return callback && callback({ success: false, error: 'Erro ao processar login no servidor. Tente novamente.' });
       }
-
-      cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-login');
-
-      const activeUser = {
-        ...user,
-        socketId: socket.id,
-        status: user.status || 'online',
-        isMuted: false,
-        isDeafened: false,
-        isScreenSharing: false,
-        activeVoiceChannel: null
-      };
-      activeSockets.set(socket.id, activeUser);
-
-      const userServers = getServersForUser(user.id);
-
-      if (callback) {
-        callback({
-          success: true,
-          user: {
-            ...user,
-            password: undefined
-          },
-          servers: userServers,
-          voiceRooms: Object.fromEntries(voiceRooms)
-        });
-      }
-
-      io.emit('user-status-changed', { user: activeUser });
     });
 
     // Auto-Login / Resume Saved Session (STRICT JWT VALIDATION — NEVER ACCEPTS USERID ALONE)
     socket.on('auth-session', ({ token, userId }, callback) => {
-      if (!token || typeof token !== 'string') {
-        return callback && callback({ success: false, error: 'Token de sessão ausente. Faça login novamente.' });
-      }
+      try {
+        if (!token || typeof token !== 'string') {
+          return callback && callback({ success: false, error: 'Token de sessão ausente. Faça login novamente.' });
+        }
 
-      const decoded = verifyUserToken(token);
-      if (!decoded || !decoded.userId) {
-        return callback && callback({ success: false, error: 'Sessão inválida ou expirada. Faça login novamente.' });
-      }
+        const decoded = verifyUserToken(token);
+        if (!decoded || !decoded.userId) {
+          return callback && callback({ success: false, error: 'Sessão inválida ou expirada. Faça login novamente.' });
+        }
 
-      // Retrieve user strictly by decoded.userId from the cryptographically verified JWT token
-      const user = registeredUsers.find((u) => u.id === decoded.userId);
-      if (!user) {
-        return callback && callback({ success: false, error: 'Usuário da sessão não encontrado. Faça login novamente.' });
-      }
+        const targetUserId = decoded.userId;
+        const user = registeredUsers.find((u) => u.id === targetUserId);
+        if (!user) {
+          return callback && callback({ success: false, error: 'Usuário não encontrado. Faça login novamente.' });
+        }
 
-      // If client supplied userId, ensure it matches verified token
-      if (userId && userId !== decoded.userId) {
-        console.warn(`[Security Alert] Session token mismatch: client claims ${userId}, token belongs to ${decoded.userId}`);
-        return callback && callback({ success: false, error: 'Violação de identidade de sessão detectada.' });
-      }
-
-      // Refresh JWT token
-      user.token = signUserToken(user);
-
-      // Clean up any stale sockets for this user ID
-      for (const [oldSockId, oldUser] of activeSockets.entries()) {
-        if (oldUser.id === user.id && oldSockId !== socket.id) {
-          const oldSock = io.sockets.sockets.get(oldSockId);
-          if (!oldSock || !oldSock.connected) {
-            activeSockets.delete(oldSockId);
+        // Clean up any stale sockets for this user ID
+        for (const [oldSockId, oldUser] of activeSockets.entries()) {
+          if (oldUser.id === user.id && oldSockId !== socket.id) {
+            const oldSock = io.sockets.sockets.get(oldSockId);
+            if (!oldSock || !oldSock.connected) {
+              activeSockets.delete(oldSockId);
+            }
           }
         }
+
+        cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-session');
+
+        const activeUser = {
+          ...user,
+          socketId: socket.id,
+          status: user.status || 'online',
+          isMuted: false,
+          isDeafened: false,
+          isScreenSharing: false,
+          activeVoiceChannel: null
+        };
+        activeSockets.set(socket.id, activeUser);
+
+        const userServers = getServersForUser(user.id);
+
+        if (callback) {
+          callback({
+            success: true,
+            user: {
+              ...user,
+              password: undefined
+            },
+            servers: userServers,
+            voiceRooms: Object.fromEntries(voiceRooms)
+          });
+        }
+
+        io.emit('user-status-changed', { user: activeUser });
+      } catch (err) {
+        console.error('[Auth] Error in auth-session:', err);
+        return callback && callback({ success: false, error: 'Erro ao validar sessão.' });
       }
-
-      cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-session');
-
-      const activeUser = {
-        ...user,
-        socketId: socket.id,
-        status: user.status || 'online',
-        isMuted: false,
-        isDeafened: false,
-        isScreenSharing: false,
-        activeVoiceChannel: null
-      };
-      activeSockets.set(socket.id, activeUser);
-
-      const userServers = getServersForUser(user.id);
-
-      if (callback) {
-        callback({
-          success: true,
-          user: {
-            ...user,
-            password: undefined
-          },
-          servers: userServers,
-          voiceRooms: Object.fromEntries(voiceRooms)
-        });
-      }
-
-      io.emit('user-status-changed', { user: activeUser });
     });
 
     // Explicit Logout (Revoke active session on server)
