@@ -1,8 +1,8 @@
 {
-  "version": "1.0.112",
-  "releaseDate": "2026-09-17T19:41:39.973Z",
-  "notes": "Atualizador sem janelas de terminal na versão v1.0.112.",
+  "version": "1.0.113",
+  "releaseDate": "2026-09-17T19:55:19.166Z",
+  "notes": "Reconexão automática à chamada após reinício do servidor na versão v1.0.113.",
   "hasAsar": true,
-  "size": 37487314,
-  "sha256": "4bf9bdd39c299afed21b111d95f72d0fc1407d18c2d78203af705c31dafe860e"
+  "size": 37488974,
+  "sha256": "80e2e80c263c2c3a66fce92b99d3d74e6534fa7acf87346741a0c4fbcc7964ff"
 }
