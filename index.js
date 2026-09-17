@@ -342,6 +342,43 @@ app.get('/api/update/app.asar', (req, res) => {
   res.redirect(302, GITHUB_CDN_ASAR);
 });
 
+// Linux 1-line install script endpoint (curl -sSL https://app.voxelchat.com.br/install.sh | bash)
+app.get(['/install.sh', '/install-linux.sh'], (req, res) => {
+  const scriptPath = path.join(__dirname, '../scripts/install-linux.sh');
+  if (fs.existsSync(scriptPath)) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.sendFile(scriptPath);
+  }
+  const altScriptPath = path.join(__dirname, 'install-linux.sh');
+  if (fs.existsSync(altScriptPath)) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.sendFile(altScriptPath);
+  }
+  res.status(404).send('#!/bin/bash\necho "Script de instalação não encontrado."\n');
+});
+
+// Linux .deb package download endpoint (Ubuntu / Debian / Pop!_OS / Linux Mint)
+app.get(['/download/linux', '/download/linux/deb', '/download/linux/Voxel.deb', '/download/linux/Voxel-1.0.110-amd64.deb', '/download/Voxel-1.0.110-amd64.deb'], (req, res) => {
+  const debPath = path.join(__dirname, 'Voxel-1.0.110-amd64.deb');
+  if (fs.existsSync(debPath)) {
+    res.setHeader('Content-Type', 'application/vnd.debian.binary-package');
+    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-1.0.110-amd64.deb"');
+    return res.sendFile(debPath);
+  }
+  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.110/Voxel-1.0.110-amd64.deb');
+});
+
+// Linux portable .tar.gz package download endpoint (All distributions)
+app.get(['/download/linux/tar', '/download/linux/tar.gz', '/download/linux/Voxel-1.0.110-x64.tar.gz', '/download/Voxel-1.0.110-x64.tar.gz'], (req, res) => {
+  const tarPath = path.join(__dirname, 'Voxel-1.0.110-x64.tar.gz');
+  if (fs.existsSync(tarPath)) {
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-1.0.110-x64.tar.gz"');
+    return res.sendFile(tarPath);
+  }
+  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.110/Voxel-1.0.110-x64.tar.gz');
+});
+
 // Official Windows Installer Setup direct download endpoint
 app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.110.exe', '/download/Voxel-Setup-1.0.109.exe', '/download/Voxel-Setup-1.0.107.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
   const localSetup = path.join(__dirname, 'Voxel-Setup.exe');
