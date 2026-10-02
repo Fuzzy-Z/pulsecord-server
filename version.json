@@ -1,8 +1,8 @@
 {
-  "version": "1.0.115",
-  "releaseDate": "2026-09-17T20:23:52.350Z",
-  "notes": "Foto personalizada para identificar servidores na versão v1.0.115.",
+  "version": "1.0.116",
+  "releaseDate": "2026-10-02T18:53:13.043Z",
+  "notes": "Atualização v1.0.116 com melhorias no Voxel.",
   "hasAsar": true,
-  "size": 37498019,
-  "sha256": "3452d38b124ab32634f65085d0019b30feeb07c30ec4516ef1cd3d89980aaa48"
+  "size": 37545883,
+  "sha256": "4cb3ea9211388fe56c3baa144f3dffc1698c1f9f1bf75fa496dcae74db12a253"
 }

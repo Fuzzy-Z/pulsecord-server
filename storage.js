@@ -198,6 +198,21 @@ export class StorageManager {
     };
   }
 
+  // saveData apenas faz upsert, entao remover um canal da memoria nao o
+  // apaga do banco. Esta exclusao precisa ser explicita, ou o canal volta
+  // no proximo restart. As mensagens saem junto por onDelete: Cascade.
+  async deleteChannel(channelId) {
+    if (!this.prisma || !channelId) return;
+    try {
+      await this.prisma.channel.delete({ where: { id: channelId } });
+      console.log('[Storage] Canal removido do PostgreSQL:', channelId);
+    } catch (e) {
+      // P2025 = registro inexistente: o canal so vivia em memoria/JSON.
+      if (e && e.code === 'P2025') return;
+      console.warn('[Storage] Falha ao remover canal do PostgreSQL:', e.message);
+    }
+  }
+
   async saveData(users = [], servers = [], messageHistoryMap = new Map(), verificationRequests = [], friendRequests = []) {
     let historyObj = {};
     if (messageHistoryMap instanceof Map) {

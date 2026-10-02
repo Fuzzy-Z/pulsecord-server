@@ -1487,14 +1487,18 @@ export async function setupSignaling(io, app = null) {
     // ==========================================
 
     // Create Server (Owner only, only visible to creator and invited members)
-    socket.on('create-server', ({ name, icon }, callback) => {
+    socket.on('create-server', ({ name, icon, iconUrl }, callback) => {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ error: 'Não autenticado' });
+      if (iconUrl && (typeof iconUrl !== 'string' || iconUrl.length > 350000 || !/^data:image\/(?:webp|png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(iconUrl))) {
+        return callback && callback({ error: 'Imagem do servidor inválida.' });
+      }
 
       const newServer = {
         id: `server-${Date.now()}`,
         name: name || 'Novo Espaço',
         icon: icon || (name ? name.substring(0, 2).toUpperCase() : 'PC'),
+        iconUrl: iconUrl || '',
         ownerId: user.id,
         memberIds: [user.id],
         memberRoles: {
@@ -1523,6 +1527,24 @@ export async function setupSignaling(io, app = null) {
       const formattedNew = formatServerWithMembers(newServer);
       socket.emit('server-created', formattedNew);
       if (callback) callback(formattedNew);
+    });
+
+    socket.on('update-server-icon', ({ serverId, iconUrl }, callback) => {
+      const user = activeSockets.get(socket.id);
+      const targetServer = servers.find((server) => server.id === serverId);
+      if (!user || !targetServer) return callback && callback({ success: false, error: 'Servidor não encontrado.' });
+      const roleId = targetServer.memberRoles?.[user.id];
+      const role = targetServer.roles?.find((entry) => entry.id === roleId);
+      if (targetServer.ownerId !== user.id && !role?.permissions?.administrator && !role?.permissions?.manageServer) {
+        return callback && callback({ success: false, error: 'Sem permissão para alterar o servidor.' });
+      }
+      if (typeof iconUrl !== 'string' || (iconUrl && (iconUrl.length > 350000 || !/^data:image\/(?:webp|png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(iconUrl)))) {
+        return callback && callback({ success: false, error: 'Imagem do servidor inválida.' });
+      }
+      targetServer.iconUrl = iconUrl;
+      storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests);
+      io.emit('server-updated', formatServerWithMembers(targetServer));
+      if (callback) callback({ success: true });
     });
 
     // Join an Existing Server by Invite Code or Link
@@ -1835,11 +1857,251 @@ export async function setupSignaling(io, app = null) {
       if (callback) callback({ success: true, message: inviteMsg });
     });
 
+    // ---------------------------------------------------------------
+    // Validacao compartilhada de canal.
+    // Fica isolada aqui para que criacao e edicao apliquem exatamente
+    // as mesmas regras, em vez de divergirem com o tempo.
+    // ---------------------------------------------------------------
+    // ---------------------------------------------------------------
+    // Permissoes por canal.
+    //
+    // Cada chave guarda { mode: "everyone" | "roles", roles: [roleId] }.
+    // Ausencia de regra significa liberado: canais antigos, criados antes
+    // desta funcionalidade, continuam funcionando sem migracao.
+    //
+    // Dono e administrador sempre passam, para que ninguem consiga se
+    // trancar para fora do proprio canal.
+    // ---------------------------------------------------------------
+    const CHANNEL_PERMISSION_KEYS_VOICE = ['access', 'speak', 'present', 'raiseHand'];
+    const CHANNEL_PERMISSION_KEYS_TEXT = ['access', 'sendMessages'];
+
+    const channelPermissionKeys = (type) =>
+      type === 'voice' ? CHANNEL_PERMISSION_KEYS_VOICE : CHANNEL_PERMISSION_KEYS_TEXT;
+
+    const normalizeChannelPermissions = (type, raw, serverRoles = []) => {
+      const idsValidos = new Set((serverRoles || []).map((r) => r.id));
+      const saida = {};
+
+      for (const chave of channelPermissionKeys(type)) {
+        const regra = raw && raw[chave];
+
+        if (!regra || regra.mode !== 'roles') {
+          saida[chave] = { mode: 'everyone', roles: [] };
+          continue;
+        }
+
+        // Descarta cargos que nao existem mais, senao uma regra apontando
+        // para um cargo excluido trancaria o canal para todos.
+        const cargos = Array.isArray(regra.roles)
+          ? [...new Set(regra.roles.filter((id) => idsValidos.has(id)))]
+          : [];
+
+        saida[chave] = cargos.length
+          ? { mode: 'roles', roles: cargos }
+          : { mode: 'everyone', roles: [] };
+      }
+
+      return saida;
+    };
+
+    const userHasChannelPermission = (server, channel, userId, chave) => {
+      if (!server || !channel) return true;
+      if (server.ownerId === userId) return true;
+
+      const roleId = server.memberRoles?.[userId] || 'role-member';
+      const role = (server.roles || []).find((r) => r.id === roleId);
+      if (role?.permissions?.administrator) return true;
+
+      const regra = (channel.permissions || {})[chave];
+      if (!regra || regra.mode !== 'roles') return true;
+      return Array.isArray(regra.roles) && regra.roles.includes(roleId);
+    };
+
+    // Estado vivo da sala de voz, proposital nao persistido: maos levantadas
+    // e permissoes concedidas na hora valem so enquanto a call existe.
+    // Sair da call zera, que e o comportamento esperado de um palco.
+    const voiceStageState = new Map(); // channelId -> { hands:Set, granted:Set }
+
+    const getStage = (channelId) => {
+      if (!voiceStageState.has(channelId)) {
+        voiceStageState.set(channelId, { hands: new Set(), granted: new Set() });
+      }
+      return voiceStageState.get(channelId);
+    };
+
+    const serializeStage = (channelId) => {
+      const stage = voiceStageState.get(channelId);
+      return {
+        raisedHands: stage ? [...stage.hands] : [],
+        grantedSpeakers: stage ? [...stage.granted] : []
+      };
+    };
+
+    const emitStage = (serverId, channelId) => {
+      io.emit('voice-stage-updated', { serverId, channelId, ...serializeStage(channelId) });
+    };
+
+    const findServerByChannel = (channelId) =>
+      servers.find((s) => (s.channels || []).some((c) => c.id === channelId));
+
+    // Pode falar por cargo, ou porque um moderador liberou nesta call.
+    const canSpeakNow = (server, channel, userId) =>
+      userHasChannelPermission(server, channel, userId, 'speak') ||
+      getStage(channel.id).granted.has(userId);
+
+    // Recalcula quem pode falar e apresentar em uma sala e avisa todos.
+    //
+    // Precisa rodar sempre que as permissoes do canal mudam ou que alguem
+    // ganha/perde a palavra: quem ja estava na call recebeu suas flags ao
+    // entrar, e sem este recalculo continuaria com a permissao antiga ate
+    // sair e voltar.
+    const refreshVoicePermissions = (server, channel) => {
+      if (!server || !channel) return;
+      const roomUsers = voiceRooms.get(channel.id);
+      if (!roomUsers || !roomUsers.length) return;
+
+      const mapa = {};
+      for (const u of roomUsers) {
+        u.canSpeak = canSpeakNow(server, channel, u.id);
+        u.canPresent = userHasChannelPermission(server, channel, u.id, 'present');
+        mapa[u.socketId] = {
+          userId: u.id,
+          canSpeak: u.canSpeak,
+          canPresent: u.canPresent
+        };
+      }
+      voiceRooms.set(channel.id, roomUsers);
+
+      io.emit('voice-permissions-updated', {
+        serverId: server.id,
+        channelId: channel.id,
+        permissions: mapa
+      });
+    };
+
+    // Trocar o cargo de alguem, ou mudar o que um cargo pode fazer, afeta
+    // todas as salas do servidor de uma vez -- nao da para saber de antemao
+    // em qual a pessoa esta. Por isso o recalculo varre todos os canais de
+    // voz; refreshVoicePermissions sai cedo nas salas vazias.
+    const refreshVoicePermissionsForServer = (server) => {
+      if (!server) return;
+      for (const canal of server.channels || []) {
+        if (canal.type === 'voice') refreshVoicePermissions(server, canal);
+      }
+    };
+
+    // Quem modera o palco: dono, administrador ou quem gerencia canais.
+    const canModerateStage = (server, userId) => {
+      if (!server) return false;
+      if (server.ownerId === userId) return true;
+      const roleId = server.memberRoles?.[userId] || 'role-member';
+      const role = (server.roles || []).find((r) => r.id === roleId);
+      return Boolean(role?.permissions?.administrator || role?.permissions?.manageChannels);
+    };
+
+    const CHANNEL_NAME_MAX = 32;
+    const CHANNEL_TITLE_MAX = 64;
+    const CHANNEL_TOPIC_MAX = 512;
+
+    // O canal tem dois nomes distintos:
+    //   title -> o que a pessoa ve. Preserva acentos, espacos e maiusculas.
+    //   name  -> o slug, identificador estavel usado em mencoes e rotas.
+    // Separar os dois permite "Sala Principal" na tela com "sala-principal"
+    // por baixo, e o slug pode ser editado a parte.
+    const normalizeChannelSlug = (raw) =>
+      String(raw || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9\-_\u00c0-\u00ff]/g, '')
+        .replace(/-{2,}/g, '-')
+        .replace(/^-+|-+$/g, '');
+
+    // Compatibilidade: chamadas antigas ainda usam este nome.
+    const normalizeChannelName = normalizeChannelSlug;
+
+    const normalizeChannelTitle = (raw) =>
+      String(raw || '')
+        .trim()
+        // Remove controles invisiveis que quebrariam o layout.
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .replace(/\s+/g, ' ');
+
+    const validateChannelInput = ({ name, title, slug, type, topic, userLimit }) => {
+      const cleanType = type === 'voice' ? 'voice' : 'text';
+
+      // title e o campo novo; name continua aceito para nao quebrar
+      // chamadas antigas, servindo de origem para os dois valores.
+      const cleanTitle = normalizeChannelTitle(title ?? name);
+      if (!cleanTitle) {
+        return { error: 'Informe um nome valido para o canal.' };
+      }
+      if (cleanTitle.length > CHANNEL_TITLE_MAX) {
+        return { error: 'O titulo deve ter no maximo ' + CHANNEL_TITLE_MAX + ' caracteres.' };
+      }
+
+      // Slug explicito quando informado; senao derivado do titulo.
+      let cleanSlug = normalizeChannelSlug(slug);
+      const slugExplicito = Boolean(cleanSlug);
+
+      // Um slug informado a mao fora do limite e erro. Ja o derivado e
+      // truncado: o titulo aceita 64 caracteres e o slug so 32, entao sem
+      // isto um titulo longo e valido seria recusado por causa do proprio
+      // slug que ele mesmo gerou.
+      if (slugExplicito && cleanSlug.length > CHANNEL_NAME_MAX) {
+        return { error: 'O identificador deve ter no maximo ' + CHANNEL_NAME_MAX + ' caracteres.' };
+      }
+
+      if (!cleanSlug) {
+        cleanSlug = normalizeChannelSlug(cleanTitle)
+          .slice(0, CHANNEL_NAME_MAX)
+          .replace(/-+$/, '');
+      }
+
+      if (!cleanSlug) {
+        return { error: 'O titulo precisa conter ao menos uma letra ou numero.' };
+      }
+
+      const cleanTopic = String(topic || '').trim().slice(0, CHANNEL_TOPIC_MAX);
+
+      // userLimit so se aplica a voz; 0 significa ilimitado.
+      let cleanLimit = 0;
+      if (cleanType === 'voice') {
+        const parsed = Number.parseInt(userLimit, 10);
+        cleanLimit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 99) : 0;
+      }
+
+      return {
+        value: {
+          title: cleanTitle,
+          name: cleanSlug,
+          type: cleanType,
+          topic: cleanTopic,
+          userLimit: cleanLimit
+        }
+      };
+    };
+
+    const isChannelNameTaken = (server, name, type, ignoreChannelId = null) =>
+      (server.channels || []).some(
+        (c) => c.id !== ignoreChannelId && c.type === type && c.name === name
+      );
+
+    // Date.now() sozinho colide se dois canais nascem no mesmo milissegundo.
+    const buildChannelId = (server, type) => {
+      const existing = new Set((server.channels || []).map((c) => c.id));
+      let id;
+      do {
+        id = type[0] + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+      } while (existing.has(id));
+      return id;
+    };
+
     socket.on('create-channel', ({ serverId, name, type, topic, userLimit }, callback) => {
       const activeUser = activeSockets.get(socket.id);
-      if (!activeUser) return;
+      if (!activeUser) return callback && callback({ error: 'Nao autenticado.' });
       const server = servers.find((s) => s.id === serverId);
-      if (!server) return;
+      if (!server) return callback && callback({ error: 'Servidor nao encontrado.' });
 
       const isOwner = server.ownerId === activeUser.id;
       const callerRoleId = server.memberRoles?.[activeUser.id] || (isOwner ? 'role-admin' : 'role-member');
@@ -1850,19 +2112,211 @@ export async function setupSignaling(io, app = null) {
         return callback && callback({ error: 'Sem permissão para criar canais.' });
       }
 
+      const validation = validateChannelInput({ name, type, topic, userLimit });
+      if (validation.error) {
+        return callback && callback({ error: validation.error });
+      }
+      const clean = validation.value;
+
+      if (isChannelNameTaken(server, clean.name, clean.type)) {
+        return callback && callback({
+          error: 'Ja existe um canal de ' + (clean.type === 'voice' ? 'voz' : 'texto') +
+                 ' chamado "' + clean.name + '".'
+        });
+      }
+
       const newChannel = {
-        id: `${type[0]}-${Date.now()}`,
-        name: name.toLowerCase().replace(/\s+/g, '-'),
-        type: type || 'text',
-        topic: topic || '',
-        userLimit: userLimit || 0
+        id: buildChannelId(server, clean.type),
+        title: clean.title,
+        name: clean.name,
+        type: clean.type,
+        topic: clean.topic,
+        userLimit: clean.userLimit,
+        permissions: normalizeChannelPermissions(clean.type, null, server.roles)
       };
 
       server.channels.push(newChannel);
       storage.saveData(registeredUsers, servers, messageHistory);
 
       io.emit('channel-created', { serverId, channel: newChannel });
-      if (callback) callback(newChannel);
+      if (callback) callback({ success: true, channel: newChannel });
+    });
+
+    socket.on('update-channel', ({ serverId, channelId, name, title, slug, topic, userLimit }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return callback && callback({ error: 'Nao autenticado.' });
+      const server = servers.find((s) => s.id === serverId);
+      if (!server) return callback && callback({ error: 'Servidor nao encontrado.' });
+
+      const isOwner = server.ownerId === activeUser.id;
+      const callerRoleId = server.memberRoles?.[activeUser.id] || (isOwner ? 'role-admin' : 'role-member');
+      const callerRoleObj = (server.roles || []).find((r) => r.id === callerRoleId);
+      const podeGerenciar =
+        isOwner ||
+        callerRoleObj?.permissions?.administrator ||
+        callerRoleObj?.permissions?.manageChannels;
+
+      if (!podeGerenciar) {
+        return callback && callback({ error: 'Sem permissao para editar canais.' });
+      }
+
+      const channel = (server.channels || []).find((c) => c.id === channelId);
+      if (!channel) return callback && callback({ error: 'Canal nao encontrado.' });
+
+      // Mesma validacao da criacao: as duas rotas nao podem divergir.
+      const validation = validateChannelInput({
+        name,
+        title,
+        slug,
+        type: channel.type,
+        topic,
+        userLimit
+      });
+      if (validation.error) {
+        return callback && callback({ error: validation.error });
+      }
+      const clean = validation.value;
+
+      // ignoreChannelId evita acusar duplicata do proprio canal ao salvar
+      // sem mudar o nome.
+      if (isChannelNameTaken(server, clean.name, channel.type, channel.id)) {
+        return callback && callback({
+          error: 'Ja existe um canal de ' + (channel.type === 'voice' ? 'voz' : 'texto') +
+                 ' chamado "' + clean.name + '".'
+        });
+      }
+
+      channel.title = clean.title;
+      channel.name = clean.name;
+      channel.topic = clean.topic;
+      channel.userLimit = clean.userLimit;
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+      io.emit('channel-updated', { serverId, channel });
+      if (callback) callback({ success: true, channel });
+    });
+
+    socket.on('update-channel-permissions', ({ serverId, channelId, permissions }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return callback && callback({ error: 'Nao autenticado.' });
+      const server = servers.find((s) => s.id === serverId);
+      if (!server) return callback && callback({ error: 'Servidor nao encontrado.' });
+
+      const isOwner = server.ownerId === activeUser.id;
+      const callerRoleId = server.memberRoles?.[activeUser.id] || (isOwner ? 'role-admin' : 'role-member');
+      const callerRoleObj = (server.roles || []).find((r) => r.id === callerRoleId);
+      const podeGerenciar =
+        isOwner ||
+        callerRoleObj?.permissions?.administrator ||
+        callerRoleObj?.permissions?.manageChannels;
+
+      if (!podeGerenciar) {
+        return callback && callback({ error: 'Sem permissao para alterar este canal.' });
+      }
+
+      const channel = (server.channels || []).find((c) => c.id === channelId);
+      if (!channel) return callback && callback({ error: 'Canal nao encontrado.' });
+
+      channel.permissions = normalizeChannelPermissions(channel.type, permissions, server.roles);
+      storage.saveData(registeredUsers, servers, messageHistory);
+
+      // Aplica de imediato a quem ja esta na call.
+      refreshVoicePermissions(server, channel);
+
+      io.emit('channel-updated', { serverId, channel });
+      if (callback) callback({ success: true, channel });
+    });
+
+    socket.on('delete-channel', async ({ serverId, channelId }, callback) => {
+      const activeUser = activeSockets.get(socket.id);
+      if (!activeUser) return callback && callback({ error: 'Nao autenticado.' });
+      const server = servers.find((s) => s.id === serverId);
+      if (!server) return callback && callback({ error: 'Servidor nao encontrado.' });
+
+      const isOwner = server.ownerId === activeUser.id;
+      const callerRoleId = server.memberRoles?.[activeUser.id] || (isOwner ? 'role-admin' : 'role-member');
+      const callerRoleObj = (server.roles || []).find((r) => r.id === callerRoleId);
+      const canManageChannels =
+        isOwner ||
+        callerRoleObj?.permissions?.administrator ||
+        callerRoleObj?.permissions?.manageChannels;
+
+      if (!canManageChannels) {
+        return callback && callback({ error: 'Sem permissao para excluir canais.' });
+      }
+
+      const index = (server.channels || []).findIndex((c) => c.id === channelId);
+      if (index === -1) {
+        return callback && callback({ error: 'Canal nao encontrado.' });
+      }
+      const channel = server.channels[index];
+
+      // Canal de voz: tira todo mundo da sala antes de sumir com ela, senao
+      // os clientes ficam presos a um canal que nao existe mais.
+      if (channel.type === 'voice') {
+        const roomUsers = voiceRooms.get(channelId) || [];
+        for (const u of roomUsers) {
+          const s = io.sockets.sockets.get(u.socketId);
+          if (s) s.leave('voice-' + channelId);
+        }
+        voiceRooms.delete(channelId);
+        io.emit('user-left-voice', { channelId, forced: true, reason: 'channel-deleted' });
+      }
+
+      server.channels.splice(index, 1);
+      messageHistory.delete(channelId);
+
+      storage.saveData(registeredUsers, servers, messageHistory);
+      await storage.deleteChannel(channelId);
+
+      io.emit('channel-deleted', { serverId, channelId });
+      if (callback) callback({ success: true, channelId });
+    });
+
+    socket.on('raise-hand', ({ channelId, raised }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ error: 'Nao autenticado.' });
+
+      const server = findServerByChannel(channelId);
+      const channel = (server?.channels || []).find((c) => c.id === channelId);
+      if (!channel) return callback && callback({ error: 'Canal nao encontrado.' });
+
+      if (!userHasChannelPermission(server, channel, user.id, 'raiseHand')) {
+        return callback && callback({ error: 'Voce nao pode levantar a mao neste canal.' });
+      }
+
+      const stage = getStage(channelId);
+      if (raised === false) stage.hands.delete(user.id);
+      else stage.hands.add(user.id);
+
+      emitStage(server.id, channelId);
+      if (callback) callback({ success: true, ...serializeStage(channelId) });
+    });
+
+    socket.on('set-speaker', ({ channelId, targetUserId, allowed }, callback) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return callback && callback({ error: 'Nao autenticado.' });
+
+      const server = findServerByChannel(channelId);
+      const channel = (server?.channels || []).find((c) => c.id === channelId);
+      if (!channel) return callback && callback({ error: 'Canal nao encontrado.' });
+
+      if (!canModerateStage(server, user.id)) {
+        return callback && callback({ error: 'Sem permissao para liberar a fala.' });
+      }
+
+      const stage = getStage(channelId);
+      if (allowed === false) {
+        stage.granted.delete(targetUserId);
+      } else {
+        stage.granted.add(targetUserId);
+        // Liberou: a mao ja cumpriu o papel dela.
+        stage.hands.delete(targetUserId);
+      }
+
+      refreshVoicePermissions(server, channel);
+      emitStage(server.id, channelId);
+      if (callback) callback({ success: true, ...serializeStage(channelId) });
     });
 
     socket.on('update-roles', ({ serverId, roles }, callback) => {
@@ -1882,6 +2336,9 @@ export async function setupSignaling(io, app = null) {
 
       server.roles = roles;
       storage.saveData(registeredUsers, servers, messageHistory);
+
+      // Mudar as permissoes de um cargo muda quem pode falar agora.
+      refreshVoicePermissionsForServer(server);
 
       const formattedServer = formatServerWithMembers(server);
       io.emit('server-roles-updated', { serverId, roles, server: formattedServer });
@@ -1909,6 +2366,10 @@ export async function setupSignaling(io, app = null) {
       server.memberRoles[targetUserId] = roleId || 'role-member';
 
       storage.saveData(registeredUsers, servers, messageHistory);
+
+      // Atribuir cargo durante a call precisa valer na hora, sem exigir
+      // que a pessoa saia e entre de novo.
+      refreshVoicePermissionsForServer(server);
 
       const formattedServer = formatServerWithMembers(server);
       io.emit('server-roles-updated', { serverId, roles: server.roles, server: formattedServer });
@@ -2488,6 +2949,22 @@ export async function setupSignaling(io, app = null) {
 
     // Send message (Handles Channels & DMs with 25MB attachment limit & auth checks)
     socket.on('send-message', ({ channelId, content, attachments }, callback) => {
+      // Restricao por cargo no canal de texto. Fica antes de qualquer
+      // processamento para que a mensagem nem chegue a existir.
+      {
+        const autor = activeSockets.get(socket.id);
+        const srv = findServerByChannel(channelId);
+        const canal = (srv?.channels || []).find((c) => c.id === channelId);
+        if (
+          autor && canal &&
+          !userHasChannelPermission(srv, canal, autor.id, 'sendMessages')
+        ) {
+          return callback && callback({
+            success: false,
+            error: 'Seu cargo nao pode enviar mensagens neste canal.'
+          });
+        }
+      }
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
 
@@ -2580,6 +3057,16 @@ export async function setupSignaling(io, app = null) {
         return;
       }
 
+      // Restricao por cargo configurada no proprio canal.
+      const serverDoCanal = servers.find((s) => s.id === serverId) || findServerByChannel(channelId);
+      const canalAlvo = (serverDoCanal?.channels || []).find((c) => c.id === channelId);
+      if (canalAlvo && !userHasChannelPermission(serverDoCanal, canalAlvo, user.id, 'access')) {
+        if (callback) {
+          callback({ success: false, error: 'Seu cargo nao tem acesso a esta reuniao.' });
+        }
+        return;
+      }
+
       // 1. Strict single-channel rule: Clean this user from ALL other voice rooms
       for (const [rId, rUsers] of Array.from(voiceRooms.entries())) {
         if (rId !== channelId) {
@@ -2638,14 +3125,27 @@ export async function setupSignaling(io, app = null) {
         isDeafened: Boolean(user.isDeafened),
         isScreenSharing: Boolean(user.isScreenSharing),
         socketId: socket.id,
-        roleId: user.roleId
+        roleId: user.roleId,
+        // Autoridade do servidor sobre o palco. O cliente usa isto para se
+        // silenciar e para ignorar o audio de quem nao tem a palavra.
+        canSpeak: canalAlvo ? canSpeakNow(serverDoCanal, canalAlvo, user.id) : true,
+        canPresent: canalAlvo
+          ? userHasChannelPermission(serverDoCanal, canalAlvo, user.id, 'present')
+          : true
       });
       voiceRooms.set(channelId, cleanUsers);
 
       cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'join-voice');
 
+      // Precisa levar a entrada da sala, nao so o usuario de activeSockets:
+      // e ali que ficam canSpeak e canPresent. Sem elas, quem ja estava na
+      // call recebe canSpeak undefined e nao silencia quem entrou sem a
+      // palavra -- a restricao de cargo nao valia para quem chegava depois.
+      const entradaNaSala = (voiceRooms.get(channelId) || []).find(
+        (u) => u.socketId === socket.id
+      );
       socket.to(`voice-${channelId}`).emit('user-joined-voice', {
-        user: { ...user, socketId: socket.id },
+        user: { ...user, ...(entradaNaSala || {}), socketId: socket.id },
         channelId
       });
 
@@ -2656,6 +3156,15 @@ export async function setupSignaling(io, app = null) {
         callback({
           success: true,
           usersInRoom: (voiceRooms.get(channelId) || []).filter((u) => u.socketId !== socket.id && u.id !== user.id),
+          // A lista acima exclui quem esta entrando, entao as permissoes
+          // proprias precisam vir a parte. Sem isto o cliente nao tem como
+          // saber que este cargo nao pode falar neste canal.
+          selfPermissions: {
+            canSpeak: canalAlvo ? canSpeakNow(serverDoCanal, canalAlvo, user.id) : true,
+            canPresent: canalAlvo
+              ? userHasChannelPermission(serverDoCanal, canalAlvo, user.id, 'present')
+              : true
+          },
           musicPlayer,
           watchTogether
         });
@@ -2740,6 +3249,15 @@ export async function setupSignaling(io, app = null) {
       const targetSock = io.sockets.sockets.get(targetSockId);
       if (targetSock) {
         targetSock.join(`voice-${targetChannelId}`);
+      }
+
+      // targetUser vem de activeSockets e nao carrega canSpeak/canPresent.
+      // Sem recalcular, quem e movido para uma sala restrita entraria podendo
+      // falar, contornando a permissao do canal.
+      {
+        const servidorDestino = servers.find((x) => x.id === serverId) || findServerByChannel(targetChannelId);
+        const canalDestino = (servidorDestino?.channels || []).find((c) => c.id === targetChannelId);
+        if (canalDestino) refreshVoicePermissions(servidorDestino, canalDestino);
       }
 
       // Broadcast new room state immediately to everyone
