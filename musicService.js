@@ -2,6 +2,21 @@ import play_dl from 'play-dl';
 import { execFile } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
+
+const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const HISTORY_LIMIT = 100;
+const IDLE_SHUTDOWN_MS = 120 * 1000;
+const HISTORY_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'music-history.json');
+
+function loadHistoryFromDisk() {
+  try {
+    return new Map(Object.entries(JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'))));
+  } catch {
+    return new Map();
+  }
+}
 
 // yt-dlp discovery with strict OS separation (never execute .exe on Linux)
 function getYtDlpBin() {
@@ -267,14 +282,24 @@ export function resolveYtDlp(queryOrUrl) {
   });
 }
 
-export async function extractPlaylistItems(playlistUrl, limit = 25) {
-  // 1. Fast HTML scraping for YouTube Mixes & Playlists (zero binary dependency, instantaneous)
+// Playlists normais (PL..., OL...) tem pagina propria com a lista completa; mixes (RD...) so existem na pagina do video.
+function playlistPageUrl(urlStr) {
   try {
-    const htmlTracks = await extractPlaylistFromHtml(playlistUrl, limit);
-    if (htmlTracks && htmlTracks.length > 0) {
-      return htmlTracks;
-    }
-  } catch (e) {}
+    const listId = new URL(urlStr.startsWith('http') ? urlStr : `https://${urlStr}`).searchParams.get('list');
+    return listId && !listId.startsWith('RD') ? `https://www.youtube.com/playlist?list=${listId}` : urlStr;
+  } catch {
+    return urlStr;
+  }
+}
+
+export async function extractPlaylistItems(playlistUrl, limit = 25) {
+  const pageUrl = playlistPageUrl(playlistUrl);
+
+  // 1. Fast HTML scraping for YouTube Mixes & Playlists (zero binary dependency, instantaneous)
+  for (const url of new Set([pageUrl, playlistUrl])) {
+    const htmlTracks = await extractPlaylistFromHtml(url, limit);
+    if (htmlTracks.length > 0) return htmlTracks;
+  }
 
   // 2. Fallback to yt-dlp binary if available
   return new Promise((resolve) => {
@@ -282,7 +307,7 @@ export async function extractPlaylistItems(playlistUrl, limit = 25) {
     const cookieArgs = getCookieArgs();
     execFile(
       bin,
-      ['-j', '--flat-playlist', '--playlist-end', String(limit), '--no-warnings', ...cookieArgs, playlistUrl],
+      ['-j', '--flat-playlist', '--playlist-end', String(limit), '--no-warnings', ...cookieArgs, pageUrl],
       { timeout: 15000 },
       (err, stdout) => {
         if (err || !stdout) return resolve([]);
@@ -768,9 +793,78 @@ function scoreTrack(track, targetTitle, targetArtist, userWantsRemix) {
 }
 
 class MusicBotManager {
-  constructor(io) {
+  constructor(io, getServerIdForChannel = () => null) {
     this.io = io;
     this.channelPlayers = new Map();
+    this.idleTimers = new Map();
+    this.serverHistory = loadHistoryFromDisk();
+    this.getServerIdForChannel = getServerIdForChannel;
+  }
+
+  historyKey(channelId) {
+    return this.getServerIdForChannel(channelId) || `channel:${channelId}`;
+  }
+
+  getHistory(channelId) {
+    const key = this.historyKey(channelId);
+    const cutoff = Date.now() - HISTORY_WINDOW_MS;
+    const recent = (this.serverHistory.get(key) || []).filter((entry) => entry.playedAt >= cutoff);
+    this.serverHistory.set(key, recent);
+    return recent;
+  }
+
+  archiveCurrentTrack(channelId) {
+    const player = this.getPlayer(channelId);
+    if (!player.currentTrack) return;
+
+    const history = this.getHistory(channelId);
+    history.push({ ...player.currentTrack, historyId: randomUUID(), playedAt: Date.now(), channelId });
+    if (history.length > HISTORY_LIMIT) history.splice(0, history.length - HISTORY_LIMIT);
+    this.saveHistory();
+    this.broadcastToServerChannels(channelId);
+  }
+
+  saveHistory() {
+    try {
+      fs.mkdirSync(path.dirname(HISTORY_FILE), { recursive: true });
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(Object.fromEntries(this.serverHistory)));
+    } catch (err) {
+      console.warn('[MusicBot] Falha ao salvar historico:', err.message);
+    }
+  }
+
+  broadcastToServerChannels(channelId) {
+    const key = this.historyKey(channelId);
+    for (const otherChannelId of this.channelPlayers.keys()) {
+      if (otherChannelId !== channelId && this.historyKey(otherChannelId) === key) {
+        this.broadcastState(otherChannelId);
+      }
+    }
+  }
+
+  ensureQueueIds(player) {
+    for (const track of [player.currentTrack, ...player.queue]) {
+      if (track && !track.queueId) track.queueId = randomUUID();
+    }
+  }
+
+  getState(channelId) {
+    const player = this.getPlayer(channelId);
+    this.ensureQueueIds(player);
+    return { ...player, history: this.getHistory(channelId), serverTime: Date.now() };
+  }
+
+  // Posicao em segundos: tocando, conta a partir de startedAt; pausado, fica congelada em pausedAt.
+  currentPosition(player) {
+    return player.isPlaying ? (Date.now() - player.startedAt) / 1000 : player.pausedAt;
+  }
+
+  startTrack(player, track) {
+    this.cancelIdleShutdown(player.channelId);
+    player.currentTrack = track;
+    player.isPlaying = true;
+    player.startedAt = Date.now();
+    player.pausedAt = 0;
   }
 
   getPlayer(channelId) {
@@ -783,7 +877,8 @@ class MusicBotManager {
         volume: 70,
         pausedAt: 0,
         startedAt: null,
-        requestedBy: null
+        requestedBy: null,
+        idleUntil: null
       });
     }
     return this.channelPlayers.get(channelId);
@@ -1208,10 +1303,8 @@ class MusicBotManager {
           }));
 
           if (!player.currentTrack || !player.isPlaying) {
-            player.currentTrack = resolvedFirst;
-            player.isPlaying = true;
-            player.startedAt = Date.now();
-            player.pausedAt = 0;
+            this.archiveCurrentTrack(channelId);
+            this.startTrack(player, resolvedFirst);
             player.queue = rest;
           } else {
             player.queue.push(resolvedFirst, ...rest);
@@ -1235,7 +1328,7 @@ class MusicBotManager {
 
     if (isPurePlaylist) {
       try {
-        const items = await extractPlaylistItems(query, 25);
+        const items = await extractPlaylistItems(query, 50);
         if (items && items.length > 0) {
           const first = items[0];
           first.requestedBy = user ? user.username : 'Playlist';
@@ -1245,10 +1338,8 @@ class MusicBotManager {
           }));
 
           if (!player.currentTrack || !player.isPlaying) {
-            player.currentTrack = first;
-            player.isPlaying = true;
-            player.startedAt = Date.now();
-            player.pausedAt = 0;
+            this.archiveCurrentTrack(channelId);
+            this.startTrack(player, first);
             player.queue = rest;
           } else {
             player.queue.push(first, ...rest);
@@ -1270,10 +1361,8 @@ class MusicBotManager {
     track.requestedBy = user ? user.username : 'User';
 
     if (!player.currentTrack || !player.isPlaying) {
-      player.currentTrack = track;
-      player.isPlaying = true;
-      player.startedAt = Date.now();
-      player.pausedAt = 0;
+      this.archiveCurrentTrack(channelId);
+      this.startTrack(player, track);
     } else {
       player.queue.push(track);
     }
@@ -1282,7 +1371,7 @@ class MusicBotManager {
 
     // If a YouTube playlist or Mix was provided, asynchronously queue the rest of the mix
     if (isPlaylist) {
-      extractPlaylistItems(query, 25).then((items) => {
+      extractPlaylistItems(query, 50).then((items) => {
         if (items && items.length > 1) {
           const currentId = track.id?.replace('yt-', '');
           const additional = items
@@ -1314,6 +1403,7 @@ class MusicBotManager {
   pause(channelId) {
     const player = this.getPlayer(channelId);
     if (player.isPlaying) {
+      player.pausedAt = this.currentPosition(player);
       player.isPlaying = false;
       this.broadcastState(channelId);
     }
@@ -1323,6 +1413,7 @@ class MusicBotManager {
   resume(channelId) {
     const player = this.getPlayer(channelId);
     if (player.currentTrack && !player.isPlaying) {
+      player.startedAt = Date.now() - player.pausedAt * 1000;
       player.isPlaying = true;
       this.broadcastState(channelId);
     }
@@ -1331,38 +1422,156 @@ class MusicBotManager {
 
   skip(channelId) {
     const player = this.getPlayer(channelId);
+    this.archiveCurrentTrack(channelId);
+
     if (player.queue.length > 0) {
-      const nextTrack = player.queue.shift();
-      player.currentTrack = nextTrack;
-      player.isPlaying = true;
-      player.startedAt = Date.now();
+      this.startTrack(player, player.queue.shift());
       this.broadcastState(channelId);
-
-      // If it's an unresolved Spotify track, resolve its stream in background and broadcast!
-      if ((!nextTrack.url && !nextTrack.youtubeUrl) || nextTrack.source === 'spotify') {
-        this.resolveMetadata(nextTrack.query || `${nextTrack.artist} - ${nextTrack.title}`).then((resolved) => {
-          if (resolved && player.currentTrack === nextTrack) {
-            player.currentTrack = {
-              ...nextTrack,
-              ...resolved,
-              title: nextTrack.title || resolved.title,
-              artist: nextTrack.artist || resolved.artist,
-              cover: nextTrack.cover || resolved.cover
-            };
-            this.broadcastState(channelId);
-          }
-        }).catch((e) => {
-          console.warn('[MusicBot] Async skip resolve error:', e.message);
-        });
-      }
-
+      this.resolveCurrentInBackground(channelId);
       this.preResolveNext(channelId);
     } else {
       player.currentTrack = null;
       player.isPlaying = false;
+      this.scheduleIdleShutdown(channelId);
       this.broadcastState(channelId);
     }
     return player;
+  }
+
+  // Fila acabou: o player continua aberto por 2 minutos para alguem adicionar musica antes de encerrar.
+  scheduleIdleShutdown(channelId) {
+    const player = this.getPlayer(channelId);
+    this.cancelIdleShutdown(channelId);
+    player.idleUntil = Date.now() + IDLE_SHUTDOWN_MS;
+    this.idleTimers.set(channelId, setTimeout(() => {
+      this.idleTimers.delete(channelId);
+      player.idleUntil = null;
+      this.broadcastState(channelId);
+    }, IDLE_SHUTDOWN_MS));
+  }
+
+  cancelIdleShutdown(channelId) {
+    clearTimeout(this.idleTimers.get(channelId));
+    this.idleTimers.delete(channelId);
+    this.getPlayer(channelId).idleUntil = null;
+  }
+
+  // Todos os ouvintes avisam o fim da faixa; so o primeiro aviso da faixa atual avanca a fila.
+  trackEnded(channelId, queueId) {
+    const player = this.getPlayer(channelId);
+    if (!queueId || player.currentTrack?.queueId !== queueId) return player;
+    return this.skip(channelId);
+  }
+
+  previous(channelId) {
+    const player = this.getPlayer(channelId);
+    const history = this.getHistory(channelId);
+    if (history.length === 0) return this.restart(channelId);
+
+    const { historyId, playedAt, channelId: _origin, ...previousTrack } = history.pop();
+    this.saveHistory();
+    if (player.currentTrack) player.queue.unshift(player.currentTrack);
+    this.startTrack(player, { ...previousTrack, queueId: randomUUID() });
+    this.broadcastState(channelId);
+    this.broadcastToServerChannels(channelId);
+    return player;
+  }
+
+  restart(channelId) {
+    const player = this.getPlayer(channelId);
+    if (player.currentTrack) {
+      this.startTrack(player, player.currentTrack);
+      this.broadcastState(channelId);
+    }
+    return player;
+  }
+
+  moveInQueue(channelId, queueId, toIndex) {
+    const player = this.getPlayer(channelId);
+    const fromIndex = player.queue.findIndex((track) => track.queueId === queueId);
+    if (fromIndex === -1 || !Number.isInteger(toIndex)) return player;
+
+    const [track] = player.queue.splice(fromIndex, 1);
+    player.queue.splice(Math.max(0, Math.min(player.queue.length, toIndex)), 0, track);
+    this.broadcastState(channelId);
+    this.preResolveNext(channelId);
+    return player;
+  }
+
+  playNow(channelId, queueId) {
+    const player = this.getPlayer(channelId);
+    const index = player.queue.findIndex((track) => track.queueId === queueId);
+    if (index === -1) return player;
+
+    const [track] = player.queue.splice(index, 1);
+    this.archiveCurrentTrack(channelId);
+    this.startTrack(player, track);
+    this.broadcastState(channelId);
+    this.resolveCurrentInBackground(channelId);
+    this.preResolveNext(channelId);
+    return player;
+  }
+
+  removeFromQueue(channelId, queueId) {
+    const player = this.getPlayer(channelId);
+    player.queue = player.queue.filter((track) => track.queueId !== queueId);
+    this.broadcastState(channelId);
+    return player;
+  }
+
+  trackFromHistory(entry, user) {
+    const { historyId, playedAt, channelId, ...track } = entry;
+    return { ...track, queueId: randomUUID(), requestedBy: user?.username || track.requestedBy };
+  }
+
+  playFromHistory(channelId, historyId, user, { now = false } = {}) {
+    const player = this.getPlayer(channelId);
+    const entry = this.getHistory(channelId).find((item) => item.historyId === historyId);
+    if (!entry) return player;
+
+    const replay = this.trackFromHistory(entry, user);
+    if (now) {
+      this.archiveCurrentTrack(channelId);
+      this.startTrack(player, replay);
+    } else if (player.currentTrack) {
+      player.queue.push(replay);
+    } else {
+      this.startTrack(player, replay);
+    }
+    this.broadcastState(channelId);
+    return player;
+  }
+
+  replayAllHistory(channelId, user) {
+    const player = this.getPlayer(channelId);
+    const replays = this.getHistory(channelId).map((entry) => this.trackFromHistory(entry, user));
+    if (replays.length === 0) return player;
+
+    if (!player.currentTrack) this.startTrack(player, replays.shift());
+    player.queue.push(...replays);
+    this.broadcastState(channelId);
+    return player;
+  }
+
+  resolveCurrentInBackground(channelId) {
+    const player = this.getPlayer(channelId);
+    const track = player.currentTrack;
+    if (!track || ((track.url || track.youtubeUrl) && track.source !== 'spotify')) return;
+
+    this.resolveMetadata(track.query || `${track.artist} - ${track.title}`).then((resolved) => {
+      if (resolved && player.currentTrack === track) {
+        player.currentTrack = {
+          ...track,
+          ...resolved,
+          title: track.title || resolved.title,
+          artist: track.artist || resolved.artist,
+          cover: track.cover || resolved.cover
+        };
+        this.broadcastState(channelId);
+      }
+    }).catch((e) => {
+      console.warn('[MusicBot] Async skip resolve error:', e.message);
+    });
   }
 
   preResolveNext(channelId) {
@@ -1385,6 +1594,8 @@ class MusicBotManager {
 
   stop(channelId) {
     const player = this.getPlayer(channelId);
+    this.cancelIdleShutdown(channelId);
+    this.archiveCurrentTrack(channelId);
     player.currentTrack = null;
     player.queue = [];
     player.isPlaying = false;
@@ -1403,7 +1614,7 @@ class MusicBotManager {
     const player = this.getPlayer(channelId);
     this.io.to(`voice-${channelId}`).emit('music-state-update', {
       channelId,
-      player
+      player: this.getState(channelId)
     });
   }
 }

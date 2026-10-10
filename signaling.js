@@ -1,4 +1,4 @@
-import { MusicBotManager, PRESET_STREAMS } from './musicService.js';
+import { MusicBotManager, PRESET_STREAMS, fetchYouTubeOEmbed } from './musicService.js';
 import { StorageManager } from './storage.js';
 import { OAuth2Client } from 'google-auth-library';
 import { createAdminRoutes } from './adminRoutes.js';
@@ -229,7 +229,9 @@ const INITIAL_SERVERS = [
 ];
 
 export async function setupSignaling(io, app = null) {
-  const musicBot = new MusicBotManager(io);
+  const musicBot = new MusicBotManager(io, (channelId) =>
+    servers.find((s) => (s.channels || []).some((c) => c.id === channelId))?.id
+  );
   const storage = new StorageManager();
 
   // Initial welcome message history
@@ -351,21 +353,39 @@ export async function setupSignaling(io, app = null) {
   // Map of channelId -> Watch Together state
   const watchTogetherRooms = new Map();
 
-  const defaultWatchTogetherState = {
+  const createWatchTogetherState = () => ({
     isActive: false,
     url: '',
     isPlaying: false,
     currentTime: 0,
     lastSyncTimestamp: null,
     queue: [],
+    titles: {},
     participants: [],
     hostId: null
+  });
+
+  const broadcastWatchTogether = (channelId) => {
+    io.to(`voice-${channelId}`).emit('watch-together-state-update', {
+      channelId,
+      state: getCalculatedWatchTogetherState(channelId)
+    });
+  };
+
+  const rememberVideoTitle = async (channelId, videoId) => {
+    const room = watchTogetherRooms.get(channelId);
+    if (!videoId || !room || room.titles[videoId]) return;
+    const meta = await fetchYouTubeOEmbed(`https://www.youtube.com/watch?v=${videoId}`);
+    const current = watchTogetherRooms.get(channelId);
+    if (!meta?.title || current !== room) return;
+    room.titles[videoId] = meta.title;
+    broadcastWatchTogether(channelId);
   };
 
   function getCalculatedWatchTogetherState(channelId) {
     const current = watchTogetherRooms.get(channelId);
     if (!current || !current.isActive) {
-      return { ...defaultWatchTogetherState };
+      return createWatchTogetherState();
     }
     let currentTime = current.currentTime || 0;
     if (current.isPlaying && current.lastSyncTimestamp) {
@@ -3149,7 +3169,7 @@ export async function setupSignaling(io, app = null) {
         channelId
       });
 
-      const musicPlayer = musicBot.getPlayer(channelId);
+      const musicPlayer = musicBot.getState(channelId);
       const watchTogether = getCalculatedWatchTogetherState(channelId);
 
       if (callback) {
@@ -3421,7 +3441,7 @@ export async function setupSignaling(io, app = null) {
       }
     });
 
-    socket.on('music-control', async ({ action, channelId, query, volume }) => {
+    socket.on('music-control', async ({ action, channelId, query, volume, queueId, historyId, toIndex }) => {
       const user = activeSockets.get(socket.id);
       const targetChannel = channelId || (user ? user.activeVoiceChannel : null);
       if (!targetChannel || !user) return;
@@ -3445,6 +3465,33 @@ export async function setupSignaling(io, app = null) {
         case 'volume':
           musicBot.setVolume(targetChannel, volume);
           break;
+        case 'ended':
+          musicBot.trackEnded(targetChannel, queueId);
+          break;
+        case 'previous':
+          musicBot.previous(targetChannel);
+          break;
+        case 'restart':
+          musicBot.restart(targetChannel);
+          break;
+        case 'move':
+          musicBot.moveInQueue(targetChannel, queueId, toIndex);
+          break;
+        case 'play-now':
+          musicBot.playNow(targetChannel, queueId);
+          break;
+        case 'remove':
+          musicBot.removeFromQueue(targetChannel, queueId);
+          break;
+        case 'replay':
+          musicBot.playFromHistory(targetChannel, historyId, user);
+          break;
+        case 'replay-now':
+          musicBot.playFromHistory(targetChannel, historyId, user, { now: true });
+          break;
+        case 'replay-all':
+          musicBot.replayAllHistory(targetChannel, user);
+          break;
       }
     });
 
@@ -3454,12 +3501,12 @@ export async function setupSignaling(io, app = null) {
       const targetChannel = channelId || (user ? user.activeVoiceChannel : null);
       if (!targetChannel || !user) return;
 
-      let current = watchTogetherRooms.get(targetChannel) || { ...defaultWatchTogetherState };
+      let current = watchTogetherRooms.get(targetChannel) || createWatchTogetherState();
 
       switch (action) {
         case 'start':
           current = {
-            ...defaultWatchTogetherState,
+            ...createWatchTogetherState(),
             isActive: true,
             url: payload.url,
             isPlaying: true,
@@ -3544,24 +3591,22 @@ export async function setupSignaling(io, app = null) {
               current.currentTime = 0;
               current.lastSyncTimestamp = Date.now();
             } else {
-              current = { ...defaultWatchTogetherState };
+              current = createWatchTogetherState();
             }
           }
           break;
         case 'end':
           if (current.hostId === user.id || current.participants.includes(user.id) || current.participants.length === 0) {
-            current = { ...defaultWatchTogetherState };
+            current = createWatchTogetherState();
           }
           break;
       }
 
       watchTogetherRooms.set(targetChannel, current);
-
-      const stateToSend = getCalculatedWatchTogetherState(targetChannel);
-      io.to(`voice-${targetChannel}`).emit('watch-together-state-update', {
-        channelId: targetChannel,
-        state: stateToSend
-      });
+      broadcastWatchTogether(targetChannel);
+      if (action === 'start' || action === 'enqueue') {
+        rememberVideoTitle(targetChannel, payload?.url);
+      }
     });
 
     // Disconnect
