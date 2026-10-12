@@ -357,42 +357,44 @@ app.get(['/install.sh', '/install-linux.sh'], (req, res) => {
   res.status(404).send('#!/bin/bash\necho "Script de instalação não encontrado."\n');
 });
 
-// Linux .deb package download endpoint (Ubuntu / Debian / Pop!_OS / Linux Mint)
-app.get(['/download/linux', '/download/linux/deb', '/download/linux/Voxel.deb', '/download/linux/Voxel-1.0.110-amd64.deb', '/download/Voxel-1.0.110-amd64.deb'], (req, res) => {
-  const debPath = path.join(__dirname, 'Voxel-1.0.110-amd64.deb');
-  if (fs.existsSync(debPath)) {
-    res.setHeader('Content-Type', 'application/vnd.debian.binary-package');
-    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-1.0.110-amd64.deb"');
-    return res.sendFile(debPath);
-  }
-  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.110/Voxel-1.0.110-amd64.deb');
-});
-
-// Linux portable .tar.gz package download endpoint (All distributions)
-app.get(['/download/linux/tar', '/download/linux/tar.gz', '/download/linux/Voxel-1.0.110-x64.tar.gz', '/download/Voxel-1.0.110-x64.tar.gz'], (req, res) => {
-  const tarPath = path.join(__dirname, 'Voxel-1.0.110-x64.tar.gz');
-  if (fs.existsSync(tarPath)) {
-    res.setHeader('Content-Type', 'application/gzip');
-    res.setHeader('Content-Disposition', 'attachment; filename="Voxel-1.0.110-x64.tar.gz"');
-    return res.sendFile(tarPath);
-  }
-  res.redirect(302, 'https://github.com/VoxelChatApp/voxel-download-page/releases/download/v1.0.110/Voxel-1.0.110-x64.tar.gz');
-});
-
-// Official Windows Installer Setup direct download endpoint
-app.get(['/download', '/download/windows', '/download/Voxel-Setup-1.0.119.exe', '/download/Voxel-Setup.exe', '/download/Voxel-Setup-1.0.112.exe', '/download/Voxel-Setup-1.0.111.exe', '/download/Voxel-Setup-1.0.110.exe', '/download/Voxel-Setup-1.0.109.exe', '/download/Voxel-Setup-1.0.107.exe', '/download/Voxel-Setup-1.0.105.exe'], (req, res) => {
-  let installerVersion = '1.0.119';
+// Linux download artifacts have their own published manifest.
+function linuxArtifact(kind) {
   try {
-    const publishedVersion = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf8')).version;
-    if (/^\d+\.\d+\.\d+$/.test(publishedVersion)) installerVersion = publishedVersion;
-  } catch {}
-  const localSetup = path.join(__dirname, 'Voxel-Setup.exe');
-  if (fs.existsSync(localSetup)) {
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="Voxel-Setup-${installerVersion}.exe"`);
-    return res.sendFile(localSetup);
+    const release = JSON.parse(fs.readFileSync(path.join(__dirname, 'linux-installer.json'), 'utf8'));
+    if (!/^\d+\.\d+\.\d+$/.test(release.version)) throw new Error('Version');
+    const filename = kind === 'deb' ? `Voxel-${release.version}-amd64.deb` : `Voxel-${release.version}-x64.tar.gz`;
+    if (release[kind]?.filename !== filename) throw new Error('Filename');
+    return { ...release[kind], version: release.version };
+  } catch { return null; }
+}
+function sendLinuxArtifact(kind, res) {
+  const artifact = linuxArtifact(kind);
+  if (!artifact) return res.status(503).send('Instalador Linux temporariamente indisponível.');
+  const file = path.join(__dirname, artifact.filename);
+  if (fs.existsSync(file) && fs.statSync(file).size === artifact.size) {
+    res.setHeader('Content-Type', kind === 'deb' ? 'application/vnd.debian.binary-package' : 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${artifact.filename}"`);
+    return res.sendFile(file);
   }
-  res.status(503).send(`Instalador Voxel v${installerVersion} temporariamente indisponível.`);
+  res.redirect(302, `https://github.com/VoxelChatApp/voxel-download-page/releases/download/v${artifact.version}/${artifact.filename}`);
+}
+app.get(['/download/linux', '/download/linux/deb', '/download/linux/Voxel.deb', /^\/download(?:\/linux)?\/Voxel-\d+\.\d+\.\d+-amd64\.deb$/], (_, res) => sendLinuxArtifact('deb', res));
+app.get(['/download/linux/tar', '/download/linux/tar.gz', /^\/download(?:\/linux)?\/Voxel-\d+\.\d+\.\d+-x64\.tar\.gz$/], (_, res) => sendLinuxArtifact('tar', res));
+
+// Official Windows installer: never fall back to an unversioned stale EXE.
+app.get(['/download', '/download/windows', '/download/Voxel-Setup.exe', /^\/download\/Voxel-Setup-\d+\.\d+\.\d+\.exe$/], (_, res) => {
+  try {
+    const version = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf8')).version;
+    if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Version');
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'installer.json'), 'utf8'));
+    const filename = `Voxel-Setup-${version}.exe`;
+    if (manifest.filename !== filename) throw new Error('Filename');
+    const file = path.join(__dirname, filename);
+    if (!fs.existsSync(file) || fs.statSync(file).size !== manifest.size) throw new Error('Incomplete installer');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.sendFile(file);
+  } catch { return res.status(503).send('Instalador Windows temporariamente indisponível.'); }
 });
 
 // SPA fallback for web browser access

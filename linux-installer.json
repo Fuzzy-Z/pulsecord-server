@@ -1,0 +1,13 @@
+{
+  "version": "1.0.120",
+  "deb": {
+    "filename": "Voxel-1.0.120-amd64.deb",
+    "size": 130110392,
+    "sha256": "196181f9178ac33126e29d9f82a4a1047af99d91617c2a47eda572ae633b2e3e"
+  },
+  "tar": {
+    "filename": "Voxel-1.0.120-x64.tar.gz",
+    "size": 164511953,
+    "sha256": "7686cee22359f742e111b256a4b1302b3b180e941fa41fed208a3ba2f23a4edb"
+  }
+}

@@ -1,3 +1,4 @@
+import { socketUser, protectPublicEvents, protectScopedBroadcasts } from './publicEvents.js';
 const communityByIO = new WeakMap();
 import { installPlatformConnections } from './platformConnections.js';
 import { installCommunityFeatures } from './communityFeatures.js';
@@ -21,7 +22,7 @@ const GOOGLE_CLIENT_ID = '405787129624-ttiutf9ifmvoscr1skm302f2du5ahko7.apps.goo
 const googleOAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // Resend Email Verification Configuration
-const RESEND_API_KEY = process.env.RESEND_API_KEY || Buffer.from('cmVfTWhkZFVOV1JfbVZ4R2czeTJ5YXF4ZUtMOFVrWmpzTUxp', 'base64').toString('utf8');
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'Voxel <noreply@voxelchat.com.br>';
 const pendingVerifications = new Map(); // email -> { code, expiresAt, lastSentAt, userData }
 
@@ -229,6 +230,7 @@ const INITIAL_SERVERS = [
 ];
 
 export async function setupSignaling(io, app = null) {
+  protectPublicEvents(io);
   const musicBot = new MusicBotManager(io, (channelId) =>
     servers.find((s) => (s.channels || []).some((c) => c.id === channelId))?.id
   );
@@ -348,6 +350,8 @@ export async function setupSignaling(io, app = null) {
   }
   // Active online connections: socketId -> User profile
   const activeSockets = new Map();
+  const messageViewers = new Map();
+  protectScopedBroadcasts(io, (id, event, data) => messageViewers.get(id)?.(event, data) === true);
   // Map of channelId -> Array of userIds currently in voice
   const voiceRooms = new Map();
   // Map of channelId -> Watch Together state
@@ -513,6 +517,7 @@ export async function setupSignaling(io, app = null) {
     if (!s.inviteCode) {
       s.inviteCode = encodeServerToInvite(s);
     }
+    const { emojis, sounds, ...serverSettings } = s;
     let memberList = [];
     if (s.id === 'server-1') {
       const allKnown = [...registeredUsers];
@@ -549,7 +554,8 @@ export async function setupSignaling(io, app = null) {
     }
 
     return {
-      ...s,
+      ...serverSettings,
+      emojiCount: (emojis || []).length, soundCount: (sounds || []).length,
       members: memberList
     };
   };
@@ -777,7 +783,7 @@ export async function setupSignaling(io, app = null) {
         storage.saveData(registeredUsers, servers, messageHistory);
 
         // Activate session for this socket
-        const activeUser = {
+        const activeUser = socketUser({
           ...user,
           socketId: socket.id,
           status: 'online',
@@ -785,7 +791,7 @@ export async function setupSignaling(io, app = null) {
           isDeafened: false,
           isScreenSharing: false,
           activeVoiceChannel: null
-        };
+        });
         activeSockets.set(socket.id, activeUser);
 
         const userServers = getServersForUser(user.id);
@@ -962,7 +968,7 @@ export async function setupSignaling(io, app = null) {
         pendingVerifications.delete(normEmail);
 
         // Activate session for this socket
-        const activeUser = {
+        const activeUser = socketUser({
           ...newUser,
           socketId: socket.id,
           status: 'online',
@@ -970,7 +976,7 @@ export async function setupSignaling(io, app = null) {
           isDeafened: false,
           isScreenSharing: false,
           activeVoiceChannel: null
-        };
+        });
         activeSockets.set(socket.id, activeUser);
 
         const userServers = getServersForUser(newUser.id);
@@ -1090,7 +1096,7 @@ export async function setupSignaling(io, app = null) {
 
         cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-login');
 
-        const activeUser = {
+        const activeUser = socketUser({
           ...user,
           socketId: socket.id,
           status: user.status || 'online',
@@ -1098,7 +1104,7 @@ export async function setupSignaling(io, app = null) {
           isDeafened: false,
           isScreenSharing: false,
           activeVoiceChannel: null
-        };
+        });
         activeSockets.set(socket.id, activeUser);
 
         const userServers = getServersForUser(user.id);
@@ -1153,7 +1159,7 @@ export async function setupSignaling(io, app = null) {
 
         cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-session');
 
-        const activeUser = {
+        const activeUser = socketUser({
           ...user,
           socketId: socket.id,
           status: user.status || 'online',
@@ -1161,7 +1167,7 @@ export async function setupSignaling(io, app = null) {
           isDeafened: false,
           isScreenSharing: false,
           activeVoiceChannel: null
-        };
+        });
         activeSockets.set(socket.id, activeUser);
 
         const userServers = getServersForUser(user.id);
@@ -1942,6 +1948,20 @@ export async function setupSignaling(io, app = null) {
 
     const findServerByChannel = (channelId) =>
       servers.find((s) => (s.channels || []).some((c) => c.id === channelId));
+    const mayViewMessages = (channelId) => {
+      const user = activeSockets.get(socket.id);
+      if (!user || !canUserAccessChannel(user, channelId, servers, dmConversations)) return false;
+      if (channelId.startsWith('dm-')) return true;
+      const server = findServerByChannel(channelId), channel = server?.channels?.find(c => c.id === channelId);
+      return Boolean(server && channel && userHasChannelPermission(server, channel, user.id, 'access'));
+    };
+    messageViewers.set(socket.id, (event, data) => {
+      const user = activeSockets.get(socket.id);
+      if (!user) return false;
+      if (event === 'new-verification-request') return isMasterAdminEmail(user.email) || data?.request?.userId === user.id;
+      const channelId = data?.channelId || data?.message?.channelId;
+      return typeof channelId === 'string' && mayViewMessages(channelId);
+    });
 
     // Pode falar por cargo, ou porque um moderador liberou nesta call.
     const canSpeakNow = (server, channel, userId) =>
@@ -2385,7 +2405,7 @@ export async function setupSignaling(io, app = null) {
       if (!user) return callback && callback([]);
 
       // Strict channel access authorization (prevents unauthorized reading of private DMs and private server channels)
-      if (!canUserAccessChannel(user, channelId, servers, dmConversations)) {
+      if (!mayViewMessages(channelId)) {
         return callback && callback([]);
       }
 
@@ -2967,7 +2987,7 @@ export async function setupSignaling(io, app = null) {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ success: false, error: 'Não autenticado' });
 
-      if (!canUserAccessChannel(user, channelId, servers, dmConversations)) {
+      if (!mayViewMessages(channelId)) {
         return callback && callback({ success: false, error: 'Você não tem permissão para enviar mensagens neste canal.' });
       }
 
@@ -3595,6 +3615,7 @@ export async function setupSignaling(io, app = null) {
 
     // Disconnect
     socket.on('disconnect', () => {
+      messageViewers.delete(socket.id);
       console.log(`[Socket Disconnected] ID: ${socket.id}`);
       const user = activeSockets.get(socket.id);
 
