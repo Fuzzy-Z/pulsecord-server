@@ -1,8 +1,8 @@
 {
-  "version": "1.0.117",
-  "releaseDate": "2026-10-10T19:21:33.749Z",
-  "notes": "Atualização v1.0.117 com melhorias no Voxel.",
+  "version": "1.0.119",
+  "releaseDate": "2026-10-12T00:37:44.702Z",
+  "notes": "Deploy completo: correção do retorno de voz nas transmissões, filtro nativo atualizado e instalador Windows atualizado.",
   "hasAsar": true,
-  "size": 37608371,
-  "sha256": "411c053c7f05461ea7f8e3b3c0e7692bec4fdc1c7302896cc99b68f728a66bbc"
+  "size": 37608533,
+  "sha256": "51c82bb7391913a05d201e0a6bd3e4b897ac9813fc17ff1a14e997ae8b8070b8"
 }

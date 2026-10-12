@@ -23,11 +23,6 @@ const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'Voxel <noreply@voxel
 const pendingVerifications = new Map(); // email -> { code, expiresAt, lastSentAt, userData }
 
 async function sendVerificationEmail(email, code, username) {
-  console.log(`\n========================================`);
-  console.log(`📧 [VOXEL EMAIL VERIFICATION]`);
-  console.log(`Para: ${email} (${username})`);
-  console.log(`Código OTP: ${code}`);
-  console.log(`========================================\n`);
 
   if (!RESEND_API_KEY) {
     return { success: false, error: 'Chave da API Resend não configurada.' };
@@ -130,7 +125,9 @@ async function sendVerificationEmail(email, code, username) {
 
     if (!res.ok) {
       console.error('[Resend Error]', data);
-      return { success: false, error: data?.message || 'Erro ao enviar e-mail de verificação.' };
+      return { success: false, error: res.status === 401
+        ? 'Não foi possível enviar o código: o serviço de e-mail está com a chave inválida. Avise o suporte do Voxel.'
+        : 'Não foi possível enviar o código de verificação. Tente novamente mais tarde.' };
     }
 
     return { success: true, id: data.id };
@@ -600,6 +597,13 @@ export async function setupSignaling(io, app = null) {
 
     // Google OAuth 2.0 Login & Automatic Account Creation (Strict Verification via UserInfo or ID Token)
     socket.on('auth-google', async (rawInput, callback) => {
+      const googleStartedAt = Date.now();
+      const googleReply = callback;
+      console.info('[Google Auth Timing] received', socket.id);
+      callback = (result) => {
+        console.info('[Google Auth Timing] reply', socket.id, Date.now() - googleStartedAt, Boolean(result?.success));
+        if (typeof googleReply === 'function') googleReply(result);
+      };
       try {
         const data = (rawInput && typeof rawInput.credential === 'object') ? rawInput.credential : (rawInput || {});
         let payload = null;
@@ -636,6 +640,7 @@ export async function setupSignaling(io, app = null) {
               audience: GOOGLE_CLIENT_ID,
             });
             payload = ticket.getPayload();
+            console.info('[Google Auth Timing] verified', socket.id, Date.now() - googleStartedAt);
           } catch (verifyErr) {
             console.warn('[Security] Google ID token verification failed:', verifyErr.message);
           }
@@ -852,12 +857,15 @@ export async function setupSignaling(io, app = null) {
         // Send verification email via Resend
         const sendRes = await sendVerificationEmail(normEmail, code, cleanUsername);
 
+        if (!sendRes.success) {
+          if (pendingVerifications.get(normEmail)?.code === code) pendingVerifications.delete(normEmail);
+          return callback && callback({ success: false, error: sendRes.error });
+        }
+
         return callback && callback({
           success: true,
           pendingVerification: true,
           email: normEmail,
-          devCode: sendRes.domainUnverified ? code : undefined,
-          warning: sendRes.success ? undefined : sendRes.error
         });
       } catch (err) {
         console.error('[Auth] Error in auth-register:', err);
@@ -870,7 +878,6 @@ export async function setupSignaling(io, app = null) {
       try {
         const normEmail = (email || '').trim().toLowerCase();
         const inputCode = (code || '').trim();
-        console.log(`[Auth] verify-email request for: ${normEmail}, code: ${inputCode}`);
 
         if (!normEmail || !inputCode) {
           return callback && callback({ success: false, error: 'E-mail e código de verificação são obrigatórios.' });
@@ -879,49 +886,7 @@ export async function setupSignaling(io, app = null) {
         // Case 1: User is ALREADY registered in the database! (e.g. registered on another device or prior session)
         const existingUser = registeredUsers.find((u) => (u.email || '').trim().toLowerCase() === normEmail);
         if (existingUser) {
-          console.log(`[Auth] User ${normEmail} is already registered. Logging in directly!`);
-          existingUser.token = signUserToken(existingUser);
-
-          // Clean up any stale sockets for this user ID
-          for (const [oldSockId, oldUser] of activeSockets.entries()) {
-            if (oldUser.id === existingUser.id && oldSockId !== socket.id) {
-              const oldSock = io.sockets.sockets.get(oldSockId);
-              if (!oldSock || !oldSock.connected) {
-                activeSockets.delete(oldSockId);
-              }
-            }
-          }
-
-          cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'auth-verify-email');
-
-          const activeUser = {
-            ...existingUser,
-            socketId: socket.id,
-            status: 'online',
-            isMuted: false,
-            isDeafened: false,
-            isScreenSharing: false,
-            activeVoiceChannel: null
-          };
-          activeSockets.set(socket.id, activeUser);
-          pendingVerifications.delete(normEmail);
-
-          const userServers = getServersForUser(existingUser.id);
-
-          if (callback) {
-            callback({
-              success: true,
-              user: {
-                ...existingUser,
-                password: undefined
-              },
-              servers: userServers,
-              voiceRooms: Object.fromEntries(voiceRooms)
-            });
-          }
-
-          io.emit('user-status-changed', { user: activeUser });
-          return;
+          return callback && callback({ success: false, error: 'Sua conta já está ativada. Entre com seu e-mail e senha ou com Google.' });
         }
 
         // Case 2: New user verification via pending OTP
@@ -1036,16 +1001,15 @@ export async function setupSignaling(io, app = null) {
         }
 
         const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-        pending.code = newCode;
-        pending.expiresAt = now + 15 * 60 * 1000;
         pending.lastSentAt = now;
 
         const sendRes = await sendVerificationEmail(normEmail, newCode, pending.userData.username);
+        if (!sendRes.success) return callback && callback({ success: false, error: sendRes.error });
+        pending.code = newCode;
+        pending.expiresAt = now + 15 * 60 * 1000;
         return callback && callback({
           success: true,
           message: 'Novo código de verificação enviado!',
-          devCode: sendRes.domainUnverified ? newCode : undefined,
-          warning: sendRes.success ? undefined : sendRes.error
         });
       } catch (err) {
         console.error('[Auth] Error in auth-resend-code:', err);
