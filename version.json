@@ -1,8 +1,8 @@
 {
-  "version": "1.0.120",
-  "releaseDate": "2026-10-12T06:06:20.473Z",
-  "notes": "RNNoise, missões e medalhas com relevo, atalhos editáveis, 10 estilos, emojis, painel de sons e Steam. Segurança: novo login necessário após atualização do servidor.",
+  "version": "1.0.121",
+  "releaseDate": "2026-10-12T08:53:54.991Z",
+  "notes": "Atualizador corrigido no Windows: instalação confirmada antes de fechar o app; erros exibidos; recuperação de falhas.",
   "hasAsar": true,
-  "size": 38275988,
-  "sha256": "57f067867b3e610c699c6cdc5a3f4cf841f74206a6697c262bdb24aa90c0fd1b"
+  "size": 38279289,
+  "sha256": "1f75ab1eff4bebaf6ec307e333c4ccbeface234a953c25e83da9d1c1f1312d1d"
 }
