@@ -1,8 +1,8 @@
 {
-  "version": "1.0.121",
-  "releaseDate": "2026-10-12T08:53:54.991Z",
-  "notes": "Atualizador corrigido no Windows: instalação confirmada antes de fechar o app; erros exibidos; recuperação de falhas.",
+  "version": "1.0.122",
+  "releaseDate": "2026-10-12T12:38:29.574Z",
+  "notes": "Xadrez e quiz na call, salas temporárias e por proximidade, perfis por servidor, transferência entre dispositivos e saúde da chamada. Recuperação automática de áudio e conexão.",
   "hasAsar": true,
-  "size": 38279289,
-  "sha256": "1f75ab1eff4bebaf6ec307e333c4ccbeface234a953c25e83da9d1c1f1312d1d"
+  "size": 38321374,
+  "sha256": "f51e9eb5ae7d0cbcfe1a5b322043fce1f5f8e1639762c90596cfb83cf3db6688"
 }

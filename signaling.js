@@ -1,4 +1,5 @@
 import { socketUser, protectPublicEvents, protectScopedBroadcasts } from './publicEvents.js';
+import { installLiveCalls, serverProfile, voiceProfile } from './liveCalls.js';
 const communityByIO = new WeakMap();
 import { installPlatformConnections } from './platformConnections.js';
 import { installCommunityFeatures } from './communityFeatures.js';
@@ -418,7 +419,7 @@ export async function setupSignaling(io, app = null) {
     console.log('🛡️ [Admin API] Mounted /api/admin endpoints successfully!');
   }
 
-  const sanitizeUser = (u) => {
+  const sanitizeUser = (u, serverId = null) => {
     if (!u) return null;
     const active = Array.from(activeSockets.values()).find((act) => act.id === u.id);
     const isOnline = Boolean(active && active.status !== 'offline' && active.status !== 'invisible');
@@ -440,6 +441,7 @@ export async function setupSignaling(io, app = null) {
       equippedMedal: (u.medals || []).includes(u.equippedMedal) ? u.equippedMedal : null,
       connections: u.connections || [],
       status: active ? (active.status || 'online') : 'offline'
+      ,...(serverId ? serverProfile(registeredUsers.find(person => person.id === u.id) || u, serverId) : {})
     };
   };
 
@@ -517,7 +519,7 @@ export async function setupSignaling(io, app = null) {
     if (!s.inviteCode) {
       s.inviteCode = encodeServerToInvite(s);
     }
-    const { emojis, sounds, ...serverSettings } = s;
+    const { emojis, sounds, removedTemporaryChannels, ...serverSettings } = s;
     let memberList = [];
     if (s.id === 'server-1') {
       const allKnown = [...registeredUsers];
@@ -527,7 +529,7 @@ export async function setupSignaling(io, app = null) {
         }
       }
       memberList = allKnown.map((u) => {
-        const sanitized = sanitizeUser(u);
+        const sanitized = sanitizeUser(u, s.id);
         if (!sanitized) return null;
         const isOwner = u.id === s.ownerId;
         const roleId = (isMasterAdminEmail(u.email) && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[u.id] || (isOwner ? 'role-admin' : 'role-member'));
@@ -541,7 +543,7 @@ export async function setupSignaling(io, app = null) {
       memberList = Array.from(ids)
         .map((id) => {
           const u = registeredUsers.find((r) => r.id === id) || Array.from(activeSockets.values()).find((act) => act.id === id);
-          const sanitized = sanitizeUser(u);
+          const sanitized = sanitizeUser(u, s.id);
           if (!sanitized) return null;
           const isOwner = id === s.ownerId;
           const roleId = (u && isMasterAdminEmail(u.email) && s.id === 'server-1') ? 'role-admin' : (s.memberRoles[id] || (isOwner ? 'role-admin' : 'role-member'));
@@ -593,6 +595,15 @@ export async function setupSignaling(io, app = null) {
   });
 
   communityByIO.set(io, community);
+  const liveCalls = installLiveCalls({ io, activeSockets, voiceRooms, getServers: () => servers, getUsers: () => registeredUsers,
+    leaveVoice: (socket, user) => leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets),
+    save: () => storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests),
+    canAccess: (user, channelId, serverId) => canUserAccessVoice(user, channelId, serverId, servers, dmConversations),
+    publishServer: serverId => {
+      const server = servers.find(s => s.id === serverId); if (!server) return;
+      for (const [id, user] of activeSockets) if (server.isCommunity || server.id === 'server-1' || server.ownerId === user.id || server.memberIds?.includes(user.id)) io.to(id).emit('server-updated', formatServerWithMembers(server));
+    }
+  });
   installPlatformConnections({ io, app, activeSockets, publicProfile: sanitizeUser, getUsers: () => registeredUsers, save: () => storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests) });
   io.on('connection', (socket) => {
     console.log(`[Socket Connected] ID: ${socket.id}`);
@@ -801,7 +812,7 @@ export async function setupSignaling(io, app = null) {
             success: true,
             user: {
               ...user,
-              password: undefined
+              password: undefined, serverProfiles: undefined
             },
             servers: userServers,
             voiceRooms: Object.fromEntries(voiceRooms)
@@ -986,7 +997,7 @@ export async function setupSignaling(io, app = null) {
             success: true,
             user: {
               ...newUser,
-              password: undefined
+              password: undefined, serverProfiles: undefined
             },
             servers: userServers,
             voiceRooms: Object.fromEntries(voiceRooms)
@@ -1115,7 +1126,7 @@ export async function setupSignaling(io, app = null) {
             success: true,
             user: {
               ...user,
-              password: undefined
+              password: undefined, serverProfiles: undefined
             },
             servers: userServers,
             voiceRooms: Object.fromEntries(voiceRooms)
@@ -1177,7 +1188,7 @@ export async function setupSignaling(io, app = null) {
             success: true,
             user: {
               ...user,
-              password: undefined
+              password: undefined, serverProfiles: undefined
             },
             servers: userServers,
             voiceRooms: Object.fromEntries(voiceRooms)
@@ -1292,6 +1303,7 @@ export async function setupSignaling(io, app = null) {
       // Broadcast to everyone
       io.emit('user-profile-updated', { user: activeUser });
       io.emit('user-status-changed', { user: activeUser });
+      liveCalls.refreshProfile(activeUser.id);
 
       if (callback) {
         if (userIndex !== -1) {
@@ -1299,7 +1311,7 @@ export async function setupSignaling(io, app = null) {
             success: true,
             user: {
               ...registeredUsers[userIndex],
-              password: undefined,
+              password: undefined, serverProfiles: undefined,
               status: activeUser.status || 'online'
             }
           });
@@ -2116,7 +2128,7 @@ export async function setupSignaling(io, app = null) {
       return id;
     };
 
-    socket.on('create-channel', ({ serverId, name, type, topic, userLimit }, callback) => {
+    socket.on('create-channel', ({ serverId, name, type, topic, userLimit, voiceMode = 'standard' }, callback) => {
       const activeUser = activeSockets.get(socket.id);
       if (!activeUser) return callback && callback({ error: 'Nao autenticado.' });
       const server = servers.find((s) => s.id === serverId);
@@ -2136,6 +2148,7 @@ export async function setupSignaling(io, app = null) {
         return callback && callback({ error: validation.error });
       }
       const clean = validation.value;
+      if (!['standard', 'temporary-lobby', 'proximity'].includes(voiceMode) || (type !== 'voice' && voiceMode !== 'standard')) return callback?.({ error: 'Modo de sala inválido.' });
 
       if (isChannelNameTaken(server, clean.name, clean.type)) {
         return callback && callback({
@@ -2151,6 +2164,7 @@ export async function setupSignaling(io, app = null) {
         type: clean.type,
         topic: clean.topic,
         userLimit: clean.userLimit,
+        voiceMode,
         permissions: normalizeChannelPermissions(clean.type, null, server.roles)
       };
 
@@ -3027,6 +3041,8 @@ export async function setupSignaling(io, app = null) {
         isPinned: false,
         reactions: []
       };
+      const messageServer = findServerByChannel(channelId);
+      if (messageServer) Object.assign(message.author, serverProfile(registeredUsers.find(u => u.id === user.id) || user, messageServer.id));
 
       if (!messageHistory.has(channelId)) {
         messageHistory.set(channelId, []);
@@ -3067,7 +3083,7 @@ export async function setupSignaling(io, app = null) {
     // ==========================================
     // 4. VOICE CHANNELS & WEBRTC
     // ==========================================
-    socket.on('join-voice', ({ channelId, serverId }, callback) => {
+    socket.on('join-voice', ({ channelId, serverId, transferFromSocketId }, callback) => {
       const user = activeSockets.get(socket.id);
       if (!user) return callback && callback({ success: false, error: 'Não autenticado.' });
 
@@ -3079,7 +3095,8 @@ export async function setupSignaling(io, app = null) {
 
       // Restricao por cargo configurada no proprio canal.
       const serverDoCanal = servers.find((s) => s.id === serverId) || findServerByChannel(channelId);
-      const canalAlvo = (serverDoCanal?.channels || []).find((c) => c.id === channelId);
+      let canalAlvo = (serverDoCanal?.channels || []).find((c) => c.id === channelId);
+      if (!canalAlvo && !channelId.startsWith('dm-')) return callback?.({ success: false, error: 'Canal de voz não encontrado.' });
       if (canalAlvo && !userHasChannelPermission(serverDoCanal, canalAlvo, user.id, 'access')) {
         if (callback) {
           callback({ success: false, error: 'Seu cargo nao tem acesso a esta reuniao.' });
@@ -3087,6 +3104,27 @@ export async function setupSignaling(io, app = null) {
         return;
       }
 
+      if (transferFromSocketId) {
+        const source = activeSockets.get(transferFromSocketId);
+        const alreadyCommitted = user.activeVoiceChannel === channelId && voiceRooms.get(channelId)?.some(p => p.socketId === socket.id);
+        if (!alreadyCommitted && (!source || source.id !== user.id || source.activeVoiceChannel !== channelId || !voiceRooms.get(channelId)?.some(p => p.socketId === transferFromSocketId))) return callback?.({ success: false, error: 'A call original mudou. Atualize a lista de dispositivos.' });
+      }
+      try {
+        channelId = liveCalls.prepareJoin(user, channelId, serverId);
+        canalAlvo = serverDoCanal?.channels.find(c => c.id === channelId);
+        const others = (voiceRooms.get(channelId) || []).filter(p => p.id !== user.id && !p.isBot);
+        const existingSeat = voiceRooms.get(channelId)?.some(p => p.id === user.id);
+        if (!existingSeat && canalAlvo?.userLimit > 0 && others.length >= canalAlvo.userLimit) return callback?.({ success: false, error: 'Esta sala está cheia.' });
+      } catch (error) { return callback?.({ success: false, error: error.message }); }
+      // A voice seat belongs to one device, while login remains available on both.
+      for (const [id, previous] of activeSockets) {
+        if (id === socket.id || previous.id !== user.id || !previous.activeVoiceChannel) continue;
+        const previousSocket = io.sockets.sockets.get(id);
+        if (previousSocket) {
+          leaveCurrentVoice(previousSocket, previous, io, voiceRooms, activeSockets);
+          previousSocket.emit('voice-transferred', { channelId, targetSocketId: socket.id });
+        }
+      }
       // 1. Strict single-channel rule: Clean this user from ALL other voice rooms
       for (const [rId, rUsers] of Array.from(voiceRooms.entries())) {
         if (rId !== channelId) {
@@ -3120,12 +3158,6 @@ export async function setupSignaling(io, app = null) {
       user.isScreenSharing = false;
       socket.join(`voice-${channelId}`);
 
-      // Also ensure any other socket for the same user is updated to avoid desync
-      for (const [sId, actU] of activeSockets.entries()) {
-        if (actU.id === user.id && sId !== socket.id) {
-          actU.activeVoiceChannel = channelId;
-        }
-      }
 
       if (!voiceRooms.has(channelId)) {
         voiceRooms.set(channelId, []);
@@ -3152,6 +3184,7 @@ export async function setupSignaling(io, app = null) {
         canPresent: canalAlvo
           ? userHasChannelPermission(serverDoCanal, canalAlvo, user.id, 'present')
           : true
+        ,...voiceProfile(registeredUsers.find(u => u.id === user.id) || user, serverDoCanal?.id)
       });
       voiceRooms.set(channelId, cleanUsers);
 
@@ -3175,6 +3208,8 @@ export async function setupSignaling(io, app = null) {
       if (callback) {
         callback({
           success: true,
+          channelId,
+          serverId: serverDoCanal?.id || null,
           usersInRoom: (voiceRooms.get(channelId) || []).filter((u) => u.socketId !== socket.id && u.id !== user.id),
           // A lista acima exclui quem esta entrando, entao as permissoes
           // proprias precisam vir a parte. Sem isto o cliente nao tem como
@@ -3321,7 +3356,19 @@ export async function setupSignaling(io, app = null) {
       if (callback) callback({ success: true });
     });
 
+    const sharesVoiceRoom = (targetSocketId) => {
+      const sender = activeSockets.get(socket.id), target = activeSockets.get(targetSocketId);
+      const room = sender?.activeVoiceChannel && voiceRooms.get(sender.activeVoiceChannel);
+      return Boolean(sender && target && sender.activeVoiceChannel === target.activeVoiceChannel && room?.some(u => u.socketId === socket.id) && room.some(u => u.socketId === targetSocketId));
+    };
+    const repairTimes = new Map();
+    socket.on('webrtc-repair', ({ targetSocketId } = {}) => {
+      if (!sharesVoiceRoom(targetSocketId) || Date.now() - (repairTimes.get(targetSocketId) || 0) < 5000) return;
+      repairTimes.set(targetSocketId, Date.now());
+      io.to(targetSocketId).emit('webrtc-repair', { senderSocketId: socket.id });
+    });
     socket.on('webrtc-offer', ({ targetSocketId, offer, isScreenShare }) => {
+      if (!sharesVoiceRoom(targetSocketId)) return;
       const sender = activeSockets.get(socket.id);
       if (!sender) return;
 
@@ -3342,6 +3389,7 @@ export async function setupSignaling(io, app = null) {
     });
 
     socket.on('webrtc-answer', ({ targetSocketId, answer, isScreenShare }) => {
+      if (!sharesVoiceRoom(targetSocketId)) return;
       const sender = activeSockets.get(socket.id);
       if (!sender) return;
 
@@ -3360,6 +3408,7 @@ export async function setupSignaling(io, app = null) {
     });
 
     socket.on('webrtc-ice-candidate', ({ targetSocketId, candidate, isScreenShare }) => {
+      if (!sharesVoiceRoom(targetSocketId)) return;
       const sender = activeSockets.get(socket.id);
       if (!sender) return;
 
@@ -3380,10 +3429,13 @@ export async function setupSignaling(io, app = null) {
     socket.on('speaking-state', ({ isSpeaking }) => {
       const user = activeSockets.get(socket.id);
       if (user && user.activeVoiceChannel) {
+        const entry = voiceRooms.get(user.activeVoiceChannel)?.find(p => p.socketId === socket.id);
+        if (!entry) return;
         socket.to(`voice-${user.activeVoiceChannel}`).emit('user-speaking', {
           socketId: socket.id,
           userId: user.id,
-          isSpeaking
+          channelId: user.activeVoiceChannel,
+          isSpeaking: isSpeaking === true && !user.isMuted && !user.isDeafened && entry.canSpeak !== false
         });
       }
     });

@@ -7,6 +7,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, 'data');
 
+// PostgreSQL stores channel basics; the disk snapshot also holds permissions,
+// proximity/lobby modes and temporary-room ownership.
+export function mergePersistedChannels(snapshot = {}, databaseChannels = []) {
+  const removed = new Set(snapshot.removedTemporaryChannels || []);
+  const channels = new Map((snapshot.channels || []).filter(c => !removed.has(c.id)).map(c => [c.id, { ...c }]));
+  for (const channel of databaseChannels || []) {
+    if (!removed.has(channel.id)) channels.set(channel.id, { ...channels.get(channel.id), ...channel });
+  }
+  return [...channels.values()];
+}
+
 export class StorageManager {
   constructor() {
     this.redisClient = null;
@@ -125,7 +136,7 @@ export class StorageManager {
             const srv = {
               ...existing,
               ...s,
-              channels: s.channels?.length ? s.channels : (existing.channels || []),
+              channels: mergePersistedChannels(existing, s.channels),
               roles: s.roles?.length ? s.roles.map(r => ({
                 ...r,
                 permissions: typeof r.permissions === 'object' && r.permissions !== null
@@ -349,6 +360,11 @@ export class StorageManager {
                 });
               } catch (_) {}
             }
+
+            // Delete only explicitly removed temporary rooms. The tombstone
+            // also prevents resurrection if PostgreSQL was unavailable.
+            const removedTemporary = (s.removedTemporaryChannels || []).filter(id => typeof id === 'string' && /^voice-[0-9a-f-]{36}$/i.test(id));
+            if (removedTemporary.length) await this.prisma.channel.deleteMany({ where: { serverId: s.id, id: { in: removedTemporary } } });
 
             // Roles
             for (const r of (s.roles || [])) {

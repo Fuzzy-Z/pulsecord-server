@@ -1,4 +1,4 @@
-const PRIVATE_FIELDS = new Set(['password', 'passwordHash', 'token', 'accessToken', 'refreshToken', 'email', 'verificationCode']);
+const PRIVATE_FIELDS = new Set(['password', 'passwordHash', 'token', 'accessToken', 'refreshToken', 'email', 'verificationCode', 'serverProfiles', 'removedTemporaryChannels']);
 
 export function publicPayload(value, seen = new WeakMap()) {
   if (!value || typeof value !== 'object') return value;
