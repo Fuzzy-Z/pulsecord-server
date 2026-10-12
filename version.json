@@ -1,8 +1,8 @@
 {
-  "version": "1.0.122",
-  "releaseDate": "2026-10-12T12:38:29.574Z",
-  "notes": "Xadrez e quiz na call, salas temporárias e por proximidade, perfis por servidor, transferência entre dispositivos e saúde da chamada. Recuperação automática de áudio e conexão.",
+  "version": "1.0.123",
+  "releaseDate": "2026-10-12T22:35:39.085Z",
+  "notes": "Emojis do chat corrigidos, xadrez no palco central com entrada do adversário e painel de sons junto dos controles da call.",
   "hasAsar": true,
-  "size": 38321374,
-  "sha256": "f51e9eb5ae7d0cbcfe1a5b322043fce1f5f8e1639762c90596cfb83cf3db6688"
+  "size": 38326298,
+  "sha256": "85e8144bf1c681f9ffe4fb0ddf11ecec56a3f2004799251de120f2278e51f452"
 }

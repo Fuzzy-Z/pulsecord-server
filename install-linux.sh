@@ -6,7 +6,7 @@
 
 set -e
 
-VOXEL_VERSION="1.0.122"
+VOXEL_VERSION="1.0.123"
 TAR_URL="https://app.voxelchat.com.br/download/linux/Voxel-${VOXEL_VERSION}-x64.tar.gz"
 ICON_URL="https://app.voxelchat.com.br/icon.png"
 
