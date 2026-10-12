@@ -1,6 +1,19 @@
 import crypto from 'crypto';
+import fs from 'node:fs';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'voxel-pulsecord-jwt-secret-key-2026-production-secure';
+function privateSigningSecret() {
+  const configured = process.env.JWT_SECRET;
+  if (configured && configured !== 'voxel-pulsecord-jwt-secret-key-2026-production-secure') return configured;
+  const directory = new URL('./data/', import.meta.url);
+  const file = new URL('./data/session-signing.key', import.meta.url);
+  fs.mkdirSync(directory, { recursive: true });
+  try { fs.writeFileSync(file, crypto.randomBytes(48).toString('hex'), { flag: 'wx', mode: 0o600 }); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  const secret = fs.readFileSync(file, 'utf8').trim();
+  if (secret.length < 64) throw new Error('Invalid private session signing key');
+  return secret;
+}
+const JWT_SECRET = privateSigningSecret();
 const DEFAULT_EXPIRY_DAYS = 30;
 
 /**
@@ -26,6 +39,7 @@ export function signUserToken(user, expiresInDays = DEFAULT_EXPIRY_DAYS) {
   const header = { alg: 'HS256', typ: 'JWT' };
   const exp = Math.floor(Date.now() / 1000) + (expiresInDays * 24 * 60 * 60);
   const payload = {
+    jti: crypto.randomUUID(),
     userId: user.id,
     email: user.email || '',
     username: user.username || '',

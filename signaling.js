@@ -1,3 +1,6 @@
+const communityByIO = new WeakMap();
+import { installPlatformConnections } from './platformConnections.js';
+import { installCommunityFeatures } from './communityFeatures.js';
 import { MusicBotManager, PRESET_STREAMS, fetchYouTubeOEmbed } from './musicService.js';
 import { StorageManager } from './storage.js';
 import { OAuth2Client } from 'google-auth-library';
@@ -429,6 +432,9 @@ export async function setupSignaling(io, app = null) {
       roleId: u.roleId || 'role-member',
       isVerified: Boolean(u.isVerified),
       badges: u.badges || [],
+      medals: u.medals || [],
+      equippedMedal: (u.medals || []).includes(u.equippedMedal) ? u.equippedMedal : null,
+      connections: u.connections || [],
       status: active ? (active.status || 'online') : 'offline'
     };
   };
@@ -569,10 +575,19 @@ export async function setupSignaling(io, app = null) {
   setInterval(() => {
     const changed = cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'heartbeat');
     if (changed) {
+      community.tick();
       io.emit('voice-rooms-updated', { voiceRooms: Object.fromEntries(voiceRooms) });
     }
   }, 5000);
 
+  const community = installCommunityFeatures({ io, activeSockets, voiceRooms,
+    getUsers: () => registeredUsers, getServers: () => servers, publicProfile: sanitizeUser,
+    save: () => storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests),
+    canAccessChannel: (user, channelId, serverId) => canUserAccessVoice(user, channelId, serverId, servers, dmConversations)
+  });
+
+  communityByIO.set(io, community);
+  installPlatformConnections({ io, app, activeSockets, publicProfile: sanitizeUser, getUsers: () => registeredUsers, save: () => storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests) });
   io.on('connection', (socket) => {
     console.log(`[Socket Connected] ID: ${socket.id}`);
 
@@ -1233,7 +1248,7 @@ export async function setupSignaling(io, app = null) {
         profileData.email = normNewEmail;
       }
 
-      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'gameStartedAt', 'activity', 'username', 'email', 'appTheme', 'compactMode', 'clipSettings', 'status'];
+      const allowedFields = ['displayName', 'bio', 'pronouns', 'avatarColor', 'avatarUrl', 'bannerUrl', 'avatarDecoration', 'profileEffect', 'customStatus', 'gameStatus', 'gameStartedAt', 'activity', 'username', 'email', 'appTheme', 'compactMode', 'clipSettings', 'status', 'uiStyle'];
 
       const userIndex = registeredUsers.findIndex(u => u.id === activeUser.id);
 
@@ -3007,6 +3022,7 @@ export async function setupSignaling(io, app = null) {
         dmConversations.get(channelId).updatedAt = new Date().toISOString();
       }
 
+      community.recordMessage(user.id);
       storage.saveData(registeredUsers, servers, messageHistory);
 
       if (channelId.startsWith('dm-')) {
@@ -3154,6 +3170,8 @@ export async function setupSignaling(io, app = null) {
         });
       }
 
+      community.tick();
+
       io.emit('voice-rooms-updated', {
         voiceRooms: Object.fromEntries(voiceRooms)
       });
@@ -3245,6 +3263,7 @@ export async function setupSignaling(io, app = null) {
       }
 
       // Broadcast new room state immediately to everyone
+      community.tick();
       io.emit('voice-rooms-updated', {
         voiceRooms: Object.fromEntries(voiceRooms)
       });
@@ -3374,6 +3393,7 @@ export async function setupSignaling(io, app = null) {
             }
           });
         }
+        community.tick();
         io.emit('voice-rooms-updated', {
           voiceRooms: Object.fromEntries(voiceRooms)
         });
@@ -3759,6 +3779,8 @@ function leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets) {
   }
 
   cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'leaveCurrentVoice');
+
+  communityByIO.get(io)?.tick();
 
   io.emit('voice-rooms-updated', {
     voiceRooms: Object.fromEntries(voiceRooms)

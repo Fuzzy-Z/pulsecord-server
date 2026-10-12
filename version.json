@@ -1,8 +1,8 @@
 {
-  "version": "1.0.119",
-  "releaseDate": "2026-10-12T00:37:44.702Z",
-  "notes": "Deploy completo: correção do retorno de voz nas transmissões, filtro nativo atualizado e instalador Windows atualizado.",
+  "version": "1.0.120",
+  "releaseDate": "2026-10-12T06:06:20.473Z",
+  "notes": "RNNoise, missões e medalhas com relevo, atalhos editáveis, 10 estilos, emojis, painel de sons e Steam. Segurança: novo login necessário após atualização do servidor.",
   "hasAsar": true,
-  "size": 37608533,
-  "sha256": "51c82bb7391913a05d201e0a6bd3e4b897ac9813fc17ff1a14e997ae8b8070b8"
+  "size": 38275988,
+  "sha256": "57f067867b3e610c699c6cdc5a3f4cf841f74206a6697c262bdb24aa90c0fd1b"
 }

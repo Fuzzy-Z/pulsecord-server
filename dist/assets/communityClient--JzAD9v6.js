@@ -1,0 +1,1 @@
+function d(i,n,o={}){return new Promise((m,u)=>{if(!(i!=null&&i.connected))return u(new Error("Aguarde a conexão com o servidor."));i.timeout(15e3).emit(n,o,(t,r)=>{if(t)return u(new Error("O servidor não respondeu. Tente novamente."));if(!(r!=null&&r.success))return u(new Error((r==null?void 0:r.error)||"Não foi possível concluir."));m(r)})})}export{d as c};
