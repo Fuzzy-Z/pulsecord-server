@@ -1,3 +1,4 @@
+import { passwordResetService } from './passwordReset.js';
 import { socketUser, protectPublicEvents, protectScopedBroadcasts } from './publicEvents.js';
 import { installLiveCalls, serverProfile, voiceProfile } from './liveCalls.js';
 const communityByIO = new WeakMap();
@@ -18,6 +19,7 @@ import {
   canUserManageMessage,
   MAX_CONTENT_LENGTH
 } from './security.js';
+import { updateCameraStatus } from './cameraStatus.js';
 
 const GOOGLE_CLIENT_ID = '405787129624-ttiutf9ifmvoscr1skm302f2du5ahko7.apps.googleusercontent.com';
 const googleOAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -27,7 +29,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'Voxel <noreply@voxelchat.com.br>';
 const pendingVerifications = new Map(); // email -> { code, expiresAt, lastSentAt, userData }
 
-async function sendVerificationEmail(email, code, username) {
+async function sendVerificationEmail(email, code, username, purpose = 'verify') {
 
   if (!RESEND_API_KEY) {
     return { success: false, error: 'Chave da API Resend não configurada.' };
@@ -53,10 +55,10 @@ async function sendVerificationEmail(email, code, username) {
         <tr>
           <td style="padding: 8px 32px 28px; text-align: left;">
             <p style="margin: 0 0 16px; font-size: 15px; color: #d1d5db; line-height: 1.5;">
-              Olá, <strong>${username}</strong>!
+              Olá, <strong>${String(username||'').replace(/[<>&"']/g,'')}</strong>!
             </p>
             <p style="margin: 0 0 24px; font-size: 14px; color: #9ca3af; line-height: 1.5;">
-              Use o código de verificação abaixo para confirmar sua conta no Voxel:
+              ${purpose==='reset'?'Use o código abaixo para criar uma nova senha no Voxel:':'Use o código de verificação abaixo para confirmar sua conta no Voxel:'}
             </p>
             
             <div style="background-color: #101216; border: 1px solid #2a2d35; border-radius: 8px; padding: 18px 24px; text-align: center; margin-bottom: 20px;">
@@ -69,7 +71,7 @@ async function sendVerificationEmail(email, code, username) {
               Esse código expira em 15 minutos.
             </p>
             <p style="margin: 0; font-size: 12px; color: #4b5563; line-height: 1.4;">
-              Se você não criou uma conta no Voxel, pode ignorar este e-mail.
+              ${purpose==='reset'?'Se você não solicitou uma nova senha, ignore este e-mail. Sua senha permanece igual.':'Se você não criou uma conta no Voxel, pode ignorar este e-mail.'}
             </p>
           </td>
         </tr>
@@ -95,7 +97,7 @@ async function sendVerificationEmail(email, code, username) {
       body: JSON.stringify({
         from: RESEND_FROM_EMAIL,
         to: [email],
-        subject: `${code} é o seu código de confirmação Voxel`,
+        subject: purpose==='reset'?'Redefinir sua senha do Voxel':`${code} é o seu código de confirmação Voxel`,
         html: htmlContent
       })
     });
@@ -113,7 +115,7 @@ async function sendVerificationEmail(email, code, username) {
         body: JSON.stringify({
           from: 'onboarding@resend.dev',
           to: [email],
-          subject: `${code} é o seu código de confirmação Voxel`,
+          subject: purpose==='reset'?'Redefinir sua senha do Voxel':`${code} é o seu código de confirmação Voxel`,
           html: htmlContent
         })
       });
@@ -605,7 +607,29 @@ export async function setupSignaling(io, app = null) {
     }
   });
   installPlatformConnections({ io, app, activeSockets, publicProfile: sanitizeUser, getUsers: () => registeredUsers, save: () => storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests) });
+  const passwordReset = passwordResetService({
+    getUsers: () => registeredUsers,
+    save: () => storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests),
+    sendCode: (email, code) => sendVerificationEmail(email, code, 'participante', 'reset'),
+    hashPassword,
+    onReset: user => {
+      for (const [socketId, active] of activeSockets) if (active.id === user.id) {
+        io.sockets.sockets.get(socketId)?.emit('auth-session-revoked', {reason:'Sua senha foi alterada. Entre novamente.'});
+        io.sockets.sockets.get(socketId)?.disconnect(true);
+      }
+    }
+  });
   io.on('connection', (socket) => {
+    socket.on('auth-request-password-reset', async (data, callback) => {
+      if (typeof callback !== 'function') return;
+      try { callback?.(await passwordReset.request(data?.email, socket.handshake.address)); }
+      catch { callback?.({success:false,error:'Não foi possível solicitar o código. Tente novamente.'}); }
+    });
+    socket.on('auth-reset-password', async (data, callback) => {
+      if (typeof callback !== 'function') return;
+      try { callback?.(await passwordReset.confirm(data?.email, data?.code, data?.password)); }
+      catch { callback?.({success:false,error:'Não foi possível alterar a senha. Solicite um novo código.'}); }
+    });
     console.log(`[Socket Connected] ID: ${socket.id}`);
 
     cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'connection');
@@ -801,6 +825,7 @@ export async function setupSignaling(io, app = null) {
           isMuted: false,
           isDeafened: false,
           isScreenSharing: false,
+          isCameraOn: false,
           activeVoiceChannel: null
         });
         activeSockets.set(socket.id, activeUser);
@@ -986,6 +1011,7 @@ export async function setupSignaling(io, app = null) {
           isMuted: false,
           isDeafened: false,
           isScreenSharing: false,
+          isCameraOn: false,
           activeVoiceChannel: null
         });
         activeSockets.set(socket.id, activeUser);
@@ -1114,6 +1140,7 @@ export async function setupSignaling(io, app = null) {
           isMuted: false,
           isDeafened: false,
           isScreenSharing: false,
+          isCameraOn: false,
           activeVoiceChannel: null
         });
         activeSockets.set(socket.id, activeUser);
@@ -1158,6 +1185,10 @@ export async function setupSignaling(io, app = null) {
           return callback && callback({ success: false, error: 'Usuário não encontrado. Faça login novamente.' });
         }
 
+        if ((decoded.sessionVersion || 0) !== (user.sessionVersion || 0)) {
+          return callback?.({success:false,error:'Sua senha foi alterada. Entre novamente.'});
+        }
+
         // Clean up any stale sockets for this user ID
         for (const [oldSockId, oldUser] of activeSockets.entries()) {
           if (oldUser.id === user.id && oldSockId !== socket.id) {
@@ -1177,6 +1208,7 @@ export async function setupSignaling(io, app = null) {
           isMuted: false,
           isDeafened: false,
           isScreenSharing: false,
+          isCameraOn: false,
           activeVoiceChannel: null
         });
         activeSockets.set(socket.id, activeUser);
@@ -3156,6 +3188,7 @@ export async function setupSignaling(io, app = null) {
 
       user.activeVoiceChannel = channelId;
       user.isScreenSharing = false;
+      user.isCameraOn = false;
       socket.join(`voice-${channelId}`);
 
 
@@ -3176,6 +3209,7 @@ export async function setupSignaling(io, app = null) {
         isMuted: Boolean(user.isMuted),
         isDeafened: Boolean(user.isDeafened),
         isScreenSharing: Boolean(user.isScreenSharing),
+        isCameraOn: Boolean(user.isCameraOn),
         socketId: socket.id,
         roleId: user.roleId,
         // Autoridade do servidor sobre o palco. O cliente usa isto para se
@@ -3440,12 +3474,13 @@ export async function setupSignaling(io, app = null) {
       }
     });
 
-    socket.on('update-voice-status', ({ isMuted, isDeafened, isScreenSharing }) => {
+    socket.on('update-voice-status', ({ isMuted, isDeafened, isScreenSharing, isCameraOn }) => {
       const user = activeSockets.get(socket.id);
       if (user) {
         if (typeof isMuted === 'boolean') user.isMuted = isMuted;
         if (typeof isDeafened === 'boolean') user.isDeafened = isDeafened;
         if (typeof isScreenSharing === 'boolean') user.isScreenSharing = isScreenSharing;
+        updateCameraStatus(user, voiceRooms.get(user.activeVoiceChannel), socket.id, isCameraOn);
 
         if (user.activeVoiceChannel) {
           const room = voiceRooms.get(user.activeVoiceChannel);
@@ -3849,6 +3884,7 @@ function leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets) {
   if (user && !hasOtherVoiceSocketForUser(user.id, socketId, user.activeVoiceChannel, activeSockets, io)) {
     user.activeVoiceChannel = null;
     user.isScreenSharing = false;
+    user.isCameraOn = false;
   }
 
   cleanupAndSanitizeVoiceRooms(io, voiceRooms, activeSockets, 'leaveCurrentVoice');

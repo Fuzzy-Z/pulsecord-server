@@ -1,8 +1,8 @@
 {
-  "version": "1.0.125",
-  "releaseDate": "2026-10-27T14:26:00.822Z",
-  "notes": "Qualidade automática da transmissão com alvo mínimo de 30 FPS, orçamento compartilhado de upload e métricas reais de vídeo.",
+  "version": "1.0.126",
+  "releaseDate": "2026-10-27T15:46:45.967Z",
+  "notes": "Câmeras na chamada, FPS medido em tempo real e correções na adaptação da transmissão.",
   "hasAsar": true,
-  "size": 38377393,
-  "sha256": "77083ef4e9184e785015218920a2308be311b85bd91184b620b264445b0ba66d"
+  "size": 38399221,
+  "sha256": "9100615a28a234abfef11308b6f74e4122499d89612fafabb3bc994149784781"
 }
