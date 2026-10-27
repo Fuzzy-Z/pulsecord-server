@@ -1,8 +1,8 @@
 {
-  "version": "1.0.123",
-  "releaseDate": "2026-10-12T22:35:39.085Z",
-  "notes": "Emojis do chat corrigidos, xadrez no palco central com entrada do adversário e painel de sons junto dos controles da call.",
+  "version": "1.0.125",
+  "releaseDate": "2026-10-27T14:26:00.822Z",
+  "notes": "Qualidade automática da transmissão com alvo mínimo de 30 FPS, orçamento compartilhado de upload e métricas reais de vídeo.",
   "hasAsar": true,
-  "size": 38326298,
-  "sha256": "85e8144bf1c681f9ffe4fb0ddf11ecec56a3f2004799251de120f2278e51f452"
+  "size": 38377393,
+  "sha256": "77083ef4e9184e785015218920a2308be311b85bd91184b620b264445b0ba66d"
 }
