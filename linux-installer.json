@@ -1,13 +1,13 @@
 {
-  "version": "1.0.126",
+  "version": "1.0.127",
   "deb": {
-    "filename": "Voxel-1.0.126-amd64.deb",
-    "size": 120393224,
-    "sha256": "77724cfa4cf05f1250430edba1dc4573bfadb4515d36231b102d5ba362deac94"
+    "filename": "Voxel-1.0.127-amd64.deb",
+    "size": 120389658,
+    "sha256": "c62cff0a370ce8dea4638fc27ba05947a57b1c8531207850d501912f033a2090"
   },
   "tar": {
-    "filename": "Voxel-1.0.126-x64.tar.gz",
-    "size": 145943207,
-    "sha256": "883dac35a6fb6faffdb7d57772eb9eacf20effacafa50ec382652fb231a39df7"
+    "filename": "Voxel-1.0.127-x64.tar.gz",
+    "size": 145943238,
+    "sha256": "f1a0e0bafca68f9460f3820b080932fc651b139508f9bde214fe7512c07dbc94"
   }
 }

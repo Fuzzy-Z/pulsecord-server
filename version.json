@@ -1,8 +1,8 @@
 {
-  "version": "1.0.126",
-  "releaseDate": "2026-10-27T15:46:45.967Z",
-  "notes": "Câmeras na chamada, FPS medido em tempo real e correções na adaptação da transmissão.",
+  "version": "1.0.127",
+  "releaseDate": "2026-10-28T20:55:30.114Z",
+  "notes": "Recuperação automática do microfone e da saída de áudio ao reconectar o fone e acompanhamento dos dispositivos padrão do sistema.",
   "hasAsar": true,
-  "size": 38399221,
-  "sha256": "9100615a28a234abfef11308b6f74e4122499d89612fafabb3bc994149784781"
+  "size": 38399701,
+  "sha256": "a29b51050b73df8ff9e44b31004cd2d7f3463ac39f8011670c5b8405fd7169c0"
 }
