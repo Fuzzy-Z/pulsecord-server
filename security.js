@@ -40,6 +40,8 @@ export function signUserToken(user, expiresInDays = DEFAULT_EXPIRY_DAYS) {
   const exp = Math.floor(Date.now() / 1000) + (expiresInDays * 24 * 60 * 60);
   const payload = {
     jti: crypto.randomUUID(),
+    iat: Math.floor(Date.now() / 1000),
+    sessionVersion: user.sessionVersion || 0,
     userId: user.id,
     email: user.email || '',
     username: user.username || '',

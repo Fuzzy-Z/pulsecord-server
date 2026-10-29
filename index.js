@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { setupSignaling } from './signaling.js';
+import { krispConfig } from './krisp-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +14,15 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.json());
+const krispDirectory = path.join(__dirname, 'data', 'krisp');
+app.get('/api/noise-suppression', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ krisp: krispConfig(krispDirectory) });
+});
+app.use('/vendor/krisp', express.static(krispDirectory, {
+  dotfiles: 'deny', index: false, fallthrough: false,
+  setHeaders: res => { res.setHeader('X-Robots-Tag', 'noindex, nofollow'); }
+}));
 
 const server = http.createServer(app);
 
@@ -426,7 +436,7 @@ let isListening = false;
 export function startServer(port = PORT) {
   if (isListening) return Promise.resolve(server);
   return new Promise((resolve) => {
-    server.listen(port, '0.0.0.0', () => {
+    server.listen(port, process.env.BIND_HOST || '127.0.0.1', () => {
       isListening = true;
       console.log(`🚀 PulseCord Signaling Server running on 0.0.0.0:${port}`);
       resolve(server);

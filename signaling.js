@@ -1,6 +1,8 @@
 import { passwordResetService } from './passwordReset.js';
 import { socketUser, protectPublicEvents, protectScopedBroadcasts } from './publicEvents.js';
 import { installLiveCalls, serverProfile, voiceProfile } from './liveCalls.js';
+import { installPlayTogether } from './playTogether.js';
+import { registerMessageActions, resolveMessageReply } from './messageActions.js';
 const communityByIO = new WeakMap();
 import { installPlatformConnections } from './platformConnections.js';
 import { installCommunityFeatures } from './communityFeatures.js';
@@ -597,6 +599,12 @@ export async function setupSignaling(io, app = null) {
   });
 
   communityByIO.set(io, community);
+  installPlayTogether({ io, activeSockets, voiceRooms,
+    canPresent: (user, channelId, socketId) => {
+      const member = voiceRooms.get(channelId)?.find(item => item.socketId === socketId);
+      return member?.canPresent !== false && canUserAccessVoice(user, channelId, member?.serverId, servers, dmConversations);
+    }
+  });
   const liveCalls = installLiveCalls({ io, activeSockets, voiceRooms, getServers: () => servers, getUsers: () => registeredUsers,
     leaveVoice: (socket, user) => leaveCurrentVoice(socket, user, io, voiceRooms, activeSockets),
     save: () => storage.saveData(registeredUsers, servers, messageHistory, verificationRequests, friendRequests),
@@ -2934,6 +2942,10 @@ export async function setupSignaling(io, app = null) {
       }
     });
 
+    registerMessageActions({ socket, io, getUser: () => activeSockets.get(socket.id),
+      canAccess: mayViewMessages, messageHistory,
+      save: () => storage.saveData(registeredUsers, servers, messageHistory) });
+
     // Pin Message (Requires membership & moderation / author permission)
     socket.on('pin-message', ({ channelId, messageId }, callback) => {
       const user = activeSockets.get(socket.id);
@@ -3013,7 +3025,7 @@ export async function setupSignaling(io, app = null) {
     });
 
     // Send message (Handles Channels & DMs with 25MB attachment limit & auth checks)
-    socket.on('send-message', ({ channelId, content, attachments }, callback) => {
+    socket.on('send-message', ({ channelId, content, attachments, replyToId }, callback) => {
       // Restricao por cargo no canal de texto. Fica antes de qualquer
       // processamento para que a mensagem nem chegue a existir.
       {
@@ -3049,6 +3061,10 @@ export async function setupSignaling(io, app = null) {
 
       if (!cleanContent.trim() && sanitized.length === 0) return;
 
+      let replyTo;
+      try { replyTo = resolveMessageReply(messageHistory.get(channelId) || [], replyToId); }
+      catch (error) { return callback?.({ success: false, error: error.message }); }
+
       const role = DEFAULT_ROLES.find((r) => r.id === user.roleId) || DEFAULT_ROLES[3];
 
       const message = {
@@ -3068,6 +3084,7 @@ export async function setupSignaling(io, app = null) {
           badges: user.badges || []
         },
         content: cleanContent,
+        ...(replyTo && { replyTo }),
         attachments: sanitized,
         timestamp: new Date().toISOString(),
         isPinned: false,

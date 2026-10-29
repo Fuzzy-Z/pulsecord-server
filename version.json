@@ -1,8 +1,8 @@
 {
-  "version": "1.0.129",
-  "releaseDate": "2026-10-29T12:33:53.223Z",
-  "notes": "Correção do campo de mensagem: botões alinhados, texto sem cortes e altura ajustada para mensagens com várias linhas.",
+  "version": "1.0.130",
+  "releaseDate": "2026-10-29T16:32:36.216Z",
+  "notes": "Atualização v1.0.130 com melhorias no Voxel.",
   "hasAsar": true,
-  "size": 38581983,
-  "sha256": "2c63cb9e3a5b311d068fad6a8f3cc874ef8913f46dbc80e1d0b553588721eaa3"
+  "size": 39042128,
+  "sha256": "10ef46e747027bbeb6f589ce888da8b3f99e5bc4f1dbe68b6ed3970aed97f7f1"
 }
