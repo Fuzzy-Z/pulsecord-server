@@ -1,8 +1,8 @@
 {
-  "version": "1.0.127",
-  "releaseDate": "2026-10-28T20:55:30.114Z",
-  "notes": "Recuperação automática do microfone e da saída de áudio ao reconectar o fone e acompanhamento dos dispositivos padrão do sistema.",
+  "version": "1.0.128",
+  "releaseDate": "2026-10-29T12:16:44.096Z",
+  "notes": "Chat com links clicáveis, cópia de mensagens, blocos de código com seleção de linhas, preferências de formatação e divisores de dia.",
   "hasAsar": true,
-  "size": 38399701,
-  "sha256": "a29b51050b73df8ff9e44b31004cd2d7f3463ac39f8011670c5b8405fd7169c0"
+  "size": 38581174,
+  "sha256": "9cd19551026e8d5a90c007f17908325c82621da31d646f846819fb3aaebb7e05"
 }
