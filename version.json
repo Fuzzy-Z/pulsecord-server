@@ -1,8 +1,8 @@
 {
-  "version": "1.0.132",
-  "releaseDate": "2026-10-29T17:19:06.070Z",
-  "notes": "Atualização v1.0.132 com melhorias no Voxel.",
+  "version": "1.0.133",
+  "releaseDate": "2026-10-29T17:51:57.790Z",
+  "notes": "Atualização v1.0.133 com melhorias no Voxel.",
   "hasAsar": true,
-  "size": 45359659,
-  "sha256": "bbfafc9b513607689afde705af9b48c2779970f9663abf83fcd9fbbc9bf8e1f3"
+  "size": 45370788,
+  "sha256": "2c2afb61f561113020655fe413cf3caf213a1223c3f18bf5daa0dd62207967b4"
 }
