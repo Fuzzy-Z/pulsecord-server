@@ -1,8 +1,8 @@
 {
-  "version": "1.0.128",
-  "releaseDate": "2026-10-29T12:16:44.096Z",
-  "notes": "Chat com links clicáveis, cópia de mensagens, blocos de código com seleção de linhas, preferências de formatação e divisores de dia.",
+  "version": "1.0.129",
+  "releaseDate": "2026-10-29T12:33:53.223Z",
+  "notes": "Correção do campo de mensagem: botões alinhados, texto sem cortes e altura ajustada para mensagens com várias linhas.",
   "hasAsar": true,
-  "size": 38581174,
-  "sha256": "9cd19551026e8d5a90c007f17908325c82621da31d646f846819fb3aaebb7e05"
+  "size": 38581983,
+  "sha256": "2c63cb9e3a5b311d068fad6a8f3cc874ef8913f46dbc80e1d0b553588721eaa3"
 }
