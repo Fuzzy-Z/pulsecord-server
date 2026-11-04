@@ -23,6 +23,7 @@ export class StorageManager {
     this.redisClient = null;
     this.useRedis = false;
     this.prisma = null;
+    this.removedServerIds = [];
   }
 
   async initStorage() {
@@ -82,6 +83,7 @@ export class StorageManager {
     const diskData = tryReadFile(dbPath) || tryReadFile(backupPath);
 
     if (diskData) {
+      this.removedServerIds=Array.isArray(diskData.removedServerIds)?diskData.removedServerIds:[];
       if (Array.isArray(diskData.users) && diskData.users.length > 0) {
         users = diskData.users;
       }
@@ -100,6 +102,7 @@ export class StorageManager {
       console.log(`[Storage] Loaded snapshot from disk: ${users.length} users, ${servers.length} servers, ${messageHistory.size} channels`);
     }
 
+    servers=servers.filter(s=>!this.removedServerIds.includes(s.id));
     // Step 2: If Prisma is connected, load and merge from PostgreSQL
     if (this.prisma) {
       try {
@@ -132,6 +135,7 @@ export class StorageManager {
         if (pgServers.length > 0) {
           const serverMap = new Map(servers.map(s => [s.id, s]));
           for (const s of pgServers) {
+            if(this.removedServerIds.includes(s.id))continue;
             const existing = serverMap.get(s.id) || {};
             const srv = {
               ...existing,
@@ -143,13 +147,13 @@ export class StorageManager {
                   ? r.permissions
                   : (() => { try { return JSON.parse(r.permissions || '{}'); } catch (_) { return {}; } })()
               })) : (existing.roles || []),
-              memberIds: s.members?.length ? s.members.map(m => m.userId) : (existing.memberIds || []),
+              memberIds: (s.members?.length ? s.members.map(m => m.userId) : (existing.memberIds || [])).filter(id=>!existing.leftMemberIds?.includes(id)),
               memberRoles: existing.memberRoles || {},
               members: Array.isArray(existing.members) ? existing.members : []
             };
             if (s.members && Array.isArray(s.members)) {
               s.members.forEach(m => {
-                if (m && m.userId) {
+                if (m && m.userId && !existing.leftMemberIds?.includes(m.userId)) {
                   srv.memberRoles[m.userId] = m.roleId;
                 }
               });
@@ -160,6 +164,7 @@ export class StorageManager {
         }
 
         // Load Messages
+        const deletedChannelIds=new Set(pgServers.filter(s=>this.removedServerIds.includes(s.id)).flatMap(s=>(s.channels||[]).map(c=>c.id)));
         const pgMessages = await this.prisma.message.findMany({
           include: {
             attachments: true,
@@ -170,6 +175,7 @@ export class StorageManager {
 
         if (pgMessages.length > 0) {
           for (const msg of pgMessages) {
+            if(deletedChannelIds.has(msg.channelId))continue;
             if (!messageHistory.has(msg.channelId)) {
               messageHistory.set(msg.channelId, []);
             }
@@ -267,6 +273,7 @@ export class StorageManager {
         messageHistory: historyObj,
         verificationRequests,
         friendRequests,
+        removedServerIds: this.removedServerIds,
         updatedAt: new Date().toISOString()
       }, null, 2);
 
@@ -402,6 +409,9 @@ export class StorageManager {
           } catch (_) {}
         }
 
+        // Apply explicit removals after all upserts, including older in-flight saves.
+        if(this.removedServerIds.length)await this.prisma.server.deleteMany({where:{id:{in:this.removedServerIds}}});
+        for(const server of servers||[])if(server.leftMemberIds?.length)await this.prisma.serverMember.deleteMany({where:{serverId:server.id,userId:{in:server.leftMemberIds}}});
         // Sync Messages (Only for channels registered in PostgreSQL to prevent FK violations)
         for (const [channelId, messages] of Object.entries(historyObj)) {
           if (!validChannelIds.has(channelId)) continue; // Keep DM messages in disk snapshot

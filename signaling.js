@@ -22,6 +22,7 @@ import {
   MAX_CONTENT_LENGTH
 } from './security.js';
 import { updateCameraStatus } from './cameraStatus.js';
+import { installServerLifecycle, visibleServerToUser } from './serverLifecycle.js';
 
 const GOOGLE_CLIENT_ID = '405787129624-ttiutf9ifmvoscr1skm302f2du5ahko7.apps.googleusercontent.com';
 const googleOAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
@@ -523,7 +524,7 @@ export async function setupSignaling(io, app = null) {
     if (!s.inviteCode) {
       s.inviteCode = encodeServerToInvite(s);
     }
-    const { emojis, sounds, removedTemporaryChannels, ...serverSettings } = s;
+    const { emojis, sounds, removedTemporaryChannels, leftMemberIds, ...serverSettings } = s;
     let memberList = [];
     if (s.id === 'server-1') {
       const allKnown = [...registeredUsers];
@@ -532,7 +533,7 @@ export async function setupSignaling(io, app = null) {
           allKnown.push(act);
         }
       }
-      memberList = allKnown.map((u) => {
+      memberList = allKnown.filter(u => visibleServerToUser(s,u)).map((u) => {
         const sanitized = sanitizeUser(u, s.id);
         if (!sanitized) return null;
         const isOwner = u.id === s.ownerId;
@@ -569,16 +570,16 @@ export async function setupSignaling(io, app = null) {
   // Helper to filter only servers that the user owns or is a member of
   const getServersForUser = (userId) => {
     return servers
-      .filter(
-        (s) =>
-          s.ownerId === userId ||
-          (s.memberIds && s.memberIds.includes(userId)) ||
-          s.id === 'server-1' // Community server is visible to all registered users
-      )
+      .filter(s => visibleServerToUser(s, registeredUsers.find(u=>u.id===userId) || {id:userId}))
       .map(formatServerWithMembers);
   };
 
   // In-memory DM Conversations: dmId -> { id, participants: [userId1, userId2], updatedAt }
+  installServerLifecycle({io,activeSockets,getServers:()=>servers,getUsers:()=>registeredUsers,messageHistory,storage,
+    save:()=>storage.saveData(registeredUsers,servers,messageHistory,verificationRequests,friendRequests),
+    leaveVoice:(socket,user)=>leaveCurrentVoice(socket,user,io,voiceRooms,activeSockets),
+    onUpdate:server=>{for(const [id,user]of activeSockets)if(visibleServerToUser(server,user))io.to(id).emit('server-updated',formatServerWithMembers(server))},
+    onDelete:server=>{for(const channel of server.channels||[]){voiceRooms.delete(channel.id);watchTogetherRooms.delete(channel.id);musicBot.stop(channel.id)}}});
   const dmConversations = new Map();
 
 
@@ -1633,6 +1634,8 @@ export async function setupSignaling(io, app = null) {
           communityServer.memberIds.push(user.id);
         }
         const registered = registeredUsers.find((u) => u.id === user.id);
+        communityServer.leftMemberIds=(communityServer.leftMemberIds||[]).filter(id=>id!==user.id);
+        for(const member of [user,registered,...activeSockets.values()].filter(u=>u?.id===user.id))member.leftServerIds=(member.leftServerIds||[]).filter(id=>id!=='server-1');
         if (registered) {
           if (!registered.serverIds) registered.serverIds = [];
           if (!registered.serverIds.includes('server-1')) registered.serverIds.push('server-1');
@@ -1659,6 +1662,8 @@ export async function setupSignaling(io, app = null) {
       }
 
       if (!targetServer.memberIds) targetServer.memberIds = [];
+      targetServer.leftMemberIds=(targetServer.leftMemberIds||[]).filter(id=>id!==user.id);
+      for(const member of [user,...registeredUsers,...activeSockets.values()].filter(u=>u?.id===user.id))member.leftServerIds=(member.leftServerIds||[]).filter(id=>id!==targetServer.id);
       if (!targetServer.memberIds.includes(user.id)) {
         targetServer.memberIds.push(user.id);
       }

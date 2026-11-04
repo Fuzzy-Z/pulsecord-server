@@ -242,13 +242,11 @@ export function canUserAccessChannel(user, channelId, servers, dmConversations) 
 
   // 2. Server Channel checks
   const targetServer = servers.find((s) => s.channels && s.channels.some((c) => c.id === channelId));
-  if (!targetServer) {
-    return true;
-  }
+  if (!targetServer) return false;
 
   // Public community servers allow all authenticated users
   if (targetServer.isCommunity || targetServer.id === 'server-1') {
-    return true;
+    return !user.leftServerIds?.includes(targetServer.id);
   }
 
   // Private server: user MUST be an explicit member or owner
@@ -279,10 +277,10 @@ export function canUserAccessVoice(user, channelId, serverId, servers, dmConvers
     (s) => (serverId && s.id === serverId) || (s.channels && s.channels.some((c) => c.id === channelId))
   );
 
-  if (!targetServer) return true;
+  if (!targetServer) return false;
 
   if (targetServer.isCommunity || targetServer.id === 'server-1') {
-    return true;
+    return !user.leftServerIds?.includes(targetServer.id);
   }
 
   const isMember = targetServer.ownerId === user.id ||
